@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "precious_gems"
+version = "0.1.0"
+description = "Programmatic backup and export tool for Google Gemini conversations"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Sima" }
+]
+dependencies = [
+    "playwright>=1.40.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0"
+]
+
+[project.scripts]
+precious-gems = "precious_gems.cli.entry:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
