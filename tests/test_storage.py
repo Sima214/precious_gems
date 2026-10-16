@@ -15,6 +15,7 @@ def test_slugify():
 
 def test_parse_size():
     from precious_gems.storage import parse_size
+
     assert parse_size(None) is None
     assert parse_size("") is None
     assert parse_size("1000") == 1000
@@ -71,7 +72,7 @@ def test_save_conversation_json(tmp_path: Path):
         "id": "conv2",
         "title": "JSON Conversation",
         "turn_count": 1,
-        "turns": [{"turn_index": 0, "turn_id": "r_123"}]
+        "turns": [{"turn_index": 0, "turn_id": "r_123"}],
     }
 
     record = save_conversation_json(
@@ -127,10 +128,12 @@ def test_catalog_lifecycle(tmp_path: Path):
     assert reloaded.items[1].title == "Title Two"
 
     # Test update with overlap
-    catalog.update([
-        CatalogItem(id="c0", title="Title Zero", url="https://gemini.google.com/app/c0"),
-        CatalogItem(id="c1", title="Updated One", url="https://gemini.google.com/app/c1"),
-    ])
+    catalog.update(
+        [
+            CatalogItem(id="c0", title="Title Zero", url="https://gemini.google.com/app/c0"),
+            CatalogItem(id="c1", title="Updated One", url="https://gemini.google.com/app/c1"),
+        ]
+    )
     assert len(catalog.items) == 3
     assert catalog.items[0].id == "c0"
     assert catalog.items[1].title == "Updated One"
@@ -192,3 +195,102 @@ def test_manifest_order_persistence(tmp_path: Path):
     reloaded = Manifest(tmp_path)
     assert reloaded.order == ["conv1", "conv2"]
 
+
+def test_manifest_mark_deleted_upstream(tmp_path: Path):
+    manifest = Manifest(tmp_path)
+    save_conversation(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="First Conversation",
+        url="https://gemini.google.com/app/conv1",
+        html_content="<p>1</p>",
+        manifest=manifest,
+    )
+
+    assert not manifest.conversations["conv1"].get("deleted_upstream")
+    assert manifest.mark_deleted_upstream("conv1")
+    assert manifest.conversations["conv1"]["deleted_upstream"] is True
+    assert "deleted_upstream_at" in manifest.conversations["conv1"]
+    assert not manifest.mark_deleted_upstream("nonexistent")
+
+
+def test_manifest_delete_conversation(tmp_path: Path):
+    manifest = Manifest(tmp_path)
+    save_conversation(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="First Conversation",
+        url="https://gemini.google.com/app/conv1",
+        html_content="<p>1</p>",
+        manifest=manifest,
+    )
+    folder = tmp_path / "conv1_First_Conversation"
+    assert folder.exists()
+
+    # Delete without files
+    save_conversation(
+        output_dir=tmp_path,
+        conversation_id="conv2",
+        title="Second Conversation",
+        url="https://gemini.google.com/app/conv2",
+        html_content="<p>2</p>",
+        manifest=manifest,
+    )
+    assert manifest.delete_conversation("conv2", delete_files=False)
+    assert not manifest.has_conversation("conv2")
+    assert "conv2" not in manifest.order
+    assert (tmp_path / "conv2_Second_Conversation").exists()
+
+    # Delete with files
+    assert manifest.delete_conversation("conv1", delete_files=True)
+    assert not manifest.has_conversation("conv1")
+    assert "conv1" not in manifest.order
+    assert not folder.exists()
+
+
+def test_manifest_is_up_to_date(tmp_path: Path):
+    from precious_gems.storage import Catalog, CatalogItem
+
+    manifest = Manifest(tmp_path)
+    save_conversation(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Original Title",
+        url="https://gemini.google.com/app/conv1",
+        html_content="<p>1</p>",
+        manifest=manifest,
+    )
+
+    catalog = Catalog(tmp_path)
+    catalog.update(
+        [CatalogItem(id="conv1", title="Original Title", url="https://gemini.google.com/app/conv1")]
+    )
+    assert manifest.is_up_to_date("conv1", catalog=catalog)
+    assert not manifest.is_up_to_date("conv2", catalog=catalog)
+
+    # Title changed in catalog
+    catalog.update(
+        [CatalogItem(id="conv1", title="Changed Title", url="https://gemini.google.com/app/conv1")]
+    )
+    assert not manifest.is_up_to_date("conv1", catalog=catalog)
+
+
+def test_catalog_remove_and_get_title(tmp_path: Path):
+    from precious_gems.storage import Catalog, CatalogItem
+
+    catalog = Catalog(tmp_path)
+    catalog.update(
+        [
+            CatalogItem(id="c1", title="First", url="https://gemini.google.com/app/c1"),
+            CatalogItem(id="c2", title="Second", url="https://gemini.google.com/app/c2"),
+        ]
+    )
+
+    assert catalog.get_title("c1") == "First"
+    assert catalog.get_title("c2") == "Second"
+    assert catalog.get_title("c3") is None
+
+    assert catalog.remove(["c1"])
+    assert len(catalog.items) == 1
+    assert catalog.get_title("c1") is None
+    assert not catalog.remove(["c1"])

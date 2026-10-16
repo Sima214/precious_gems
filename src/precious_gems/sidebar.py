@@ -17,7 +17,10 @@ def ensure_sidebar_open(page: Page) -> None:
     """Ensures the Gemini sidebar is open/expanded."""
     # First give Angular/Gemini components a moment to mount if loading
     try:
-        page.wait_for_selector('a[href*="/app/"], button[aria-label*="πλευρ"], button[data-test-id="side-nav-button"]', timeout=15000)
+        page.wait_for_selector(
+            'a[href*="/app/"], button[aria-label*="πλευρ"], button[data-test-id="side-nav-button"]',
+            timeout=15000,
+        )
     except PlaywrightTimeoutError:
         pass
 
@@ -35,7 +38,7 @@ def ensure_sidebar_open(page: Page) -> None:
         'button[aria-label="Open sidebar"]',
         'button[aria-label*="πλευρ"]',
         'button[aria-label*="sidebar" i]',
-        'button.side-nav-sparkle-button',
+        "button.side-nav-sparkle-button",
     ]
     for selector in toggle_selectors:
         btn = page.query_selector(selector)
@@ -85,9 +88,7 @@ def enumerate_conversations(page: Page, max_scrolls: int = 30) -> List[SidebarCo
             canonical_url = f"https://gemini.google.com/app/{conv_id}"
 
             seen_ids.add(conv_id)
-            conversations.append(
-                SidebarConversation(id=conv_id, title=title, url=canonical_url)
-            )
+            conversations.append(SidebarConversation(id=conv_id, title=title, url=canonical_url))
             new_in_round += 1
 
         if new_in_round == 0:

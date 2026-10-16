@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -e
+exec ./virtenv/bin/python -m black --line-length 100 src/ tests/

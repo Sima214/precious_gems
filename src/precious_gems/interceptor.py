@@ -62,7 +62,9 @@ def install_interceptor(page: Page) -> None:
 
 def reset_interceptor(page: Page) -> None:
     """Resets the extracted conversation payload to null."""
-    page.evaluate("() => { window.__extractedConversation = null; window.__extractedConversationError = null; }")
+    page.evaluate(
+        "() => { window.__extractedConversation = null; window.__extractedConversationError = null; }"
+    )
 
 
 def wait_for_intercepted_data(page: Page, timeout_seconds: float = 30.0) -> Dict[str, Any]:
@@ -81,4 +83,6 @@ def wait_for_intercepted_data(page: Page, timeout_seconds: float = 30.0) -> Dict
 
         page.wait_for_timeout(int(poll_interval * 1000))
 
-    raise TimeoutError(f"Timed out after {timeout_seconds}s waiting for Gemini export interception.")
+    raise TimeoutError(
+        f"Timed out after {timeout_seconds}s waiting for Gemini export interception."
+    )

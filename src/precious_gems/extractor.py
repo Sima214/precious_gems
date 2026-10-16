@@ -3,7 +3,11 @@
 import re
 import time
 from typing import Any, Dict, Optional
-from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    Error as PlaywrightError,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from .browser import is_target_closed_error
 from .interceptor import install_interceptor, reset_interceptor, wait_for_intercepted_data
@@ -29,7 +33,9 @@ def hydrate_conversation_scroll(
     # Move focus inside chat container
     box = scroller.bounding_box()
     if box:
-        page.mouse.click(box["x"] + min(200, box["width"] / 2), box["y"] + min(200, box["height"] / 2))
+        page.mouse.click(
+            box["x"] + min(200, box["width"] / 2), box["y"] + min(200, box["height"] / 2)
+        )
 
     prev_first_text: Optional[str] = None
     stable_count = 0
@@ -45,7 +51,7 @@ def hydrate_conversation_scroll(
         # Wait if a loading spinner is active
         try:
             page.wait_for_selector(
-                '.loading-content-spinner-container.is-loading, chat-loading-animation',
+                ".loading-content-spinner-container.is-loading, chat-loading-animation",
                 state="hidden",
                 timeout=10000,
             )
@@ -91,13 +97,13 @@ def trigger_export_menu(page: Page) -> None:
         'top-bar-actions button[data-test-id="chat-menu-button"]',
         'top-bar-actions button[aria-label*="επικοινωνίας"]',
         'top-bar-actions button[aria-label*="chat" i]',
-        'top-bar-actions button',
+        "top-bar-actions button",
         'button[data-test-id="chat-menu-button"]',
         'button[aria-label="Άνοιγμα μενού για ενέργειες επικοινωνίας."]',
     ]
 
     try:
-        page.wait_for_selector(', '.join(menu_button_selectors), timeout=15000)
+        page.wait_for_selector(", ".join(menu_button_selectors), timeout=15000)
     except PlaywrightTimeoutError:
         pass
 
@@ -139,7 +145,9 @@ def trigger_export_menu(page: Page) -> None:
     pdf_btn.click()
 
 
-def extract_conversation(page: Page, url_or_id: str, timeout_seconds: float = 60.0) -> Dict[str, Any]:
+def extract_conversation(
+    page: Page, url_or_id: str, timeout_seconds: float = 60.0
+) -> Dict[str, Any]:
     """Navigates to conversation, hydrates history, triggers export, and intercepts HTML."""
     target_url = url_or_id
     if not target_url.startswith("http"):
@@ -155,7 +163,7 @@ def extract_conversation(page: Page, url_or_id: str, timeout_seconds: float = 60
         try:
             page.wait_for_selector(
                 'infinite-scroller.chat-history, [class*="chat-history"], chat-window, user-query, [data-test-id="chat-menu-button"]',
-                timeout=25000
+                timeout=25000,
             )
         except PlaywrightTimeoutError:
             pass

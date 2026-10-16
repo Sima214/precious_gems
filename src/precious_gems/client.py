@@ -5,10 +5,12 @@ from typing import Any, Dict, List, Optional
 from playwright.sync_api import Error as PlaywrightError, Page
 
 from .browser import DEFAULT_CDP_URL, BrowserSession, is_target_closed_error
+from .deletion import delete_conversation_dom
 from .extractor import extract_conversation
 from .rpc import download_conversation_files, fetch_conversation_rpc, list_conversations_rpc
 from .sidebar import SidebarConversation, enumerate_conversations
 from .storage import (
+    Catalog,
     ConversationRecord,
     Manifest,
     save_conversation,
@@ -28,6 +30,7 @@ class GeminiClient:
         self.cdp_url = cdp_url
         self.output_dir = Path(output_dir)
         self.manifest = Manifest(self.output_dir)
+        self.catalog = Catalog(self.output_dir)
         self._session: Optional[BrowserSession] = None
         self._page: Optional[Page] = None
 
@@ -47,7 +50,9 @@ class GeminiClient:
         self._page = self._session.connect()
         # Navigate to /app if not already on Gemini
         if "gemini.google.com" not in self._page.url:
-            self._page.goto("https://gemini.google.com/app", wait_until="domcontentloaded", timeout=45000)
+            self._page.goto(
+                "https://gemini.google.com/app", wait_until="domcontentloaded", timeout=45000
+            )
             self._page.wait_for_timeout(2000)
         return self._page
 
@@ -114,6 +119,8 @@ class GeminiClient:
     ) -> ConversationRecord:
         """Extracts and saves a single conversation to the output directory."""
         slug = conversation_id.removeprefix("c_")
+        if title is None:
+            title = self.catalog.get_title(slug)
         data = self.get_conversation(slug, title=title, use_html_fallback=use_html_fallback)
         resolved_title = data.get("title") or title or "Untitled Conversation"
         url = data.get("url") or f"https://gemini.google.com/app/{slug}"
@@ -147,6 +154,52 @@ class GeminiClient:
             manifest=self.manifest,
         )
 
+    def delete_conversation(
+        self,
+        conversation_id: str,
+        delete_archived: bool = False,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Deletes a conversation upstream via DOM interaction, optionally purging local archive."""
+        slug = conversation_id.removeprefix("c_")
+
+        # Check archive up-to-date status unless force is requested
+        if not force:
+            if not self.manifest.is_up_to_date(slug, catalog=self.catalog):
+                return {
+                    "id": slug,
+                    "status": "skipped",
+                    "reason": "unarchived_or_outdated",
+                }
+
+        self.connect()
+        deleted = delete_conversation_dom(self.page, slug)
+        if deleted:
+            if delete_archived:
+                self.manifest.delete_conversation(slug, delete_files=True)
+                self.manifest.save()
+                if self.catalog.remove([slug]):
+                    self.catalog.save()
+                return {
+                    "id": slug,
+                    "status": "deleted",
+                    "archived_deleted": True,
+                }
+            else:
+                self.manifest.mark_deleted_upstream(slug)
+                self.manifest.save()
+                return {
+                    "id": slug,
+                    "status": "deleted",
+                    "archived_deleted": False,
+                }
+        else:
+            return {
+                "id": slug,
+                "status": "not_found",
+                "reason": "not_found_on_gemini",
+            }
+
     def sync_all(
         self,
         use_html_fallback: bool = False,
@@ -155,7 +208,9 @@ class GeminiClient:
         max_attachment_size: Optional[int] = None,
     ) -> List[ConversationRecord]:
         """Synchronizes all conversations into the local archive."""
-        convs = self.list_conversations(use_html_fallback=use_html_fallback, max_scrolls=max_scrolls)
+        convs = self.list_conversations(
+            use_html_fallback=use_html_fallback, max_scrolls=max_scrolls
+        )
         if limit is not None:
             convs = convs[:limit]
 

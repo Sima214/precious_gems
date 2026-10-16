@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+if [ -d ".git/agent" ]; then
+    rm -f .git/agent/*.md
+fi

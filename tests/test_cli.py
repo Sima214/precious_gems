@@ -21,7 +21,20 @@ def test_build_parser_export():
 
 def test_build_parser_sync():
     parser = build_parser()
-    args = parser.parse_args(["sync", "--limit", "10", "--delay", "1.5", "--cdp-url", "http://127.0.0.1:9222", "--html", "--max-attachment-size", "100MB"])
+    args = parser.parse_args(
+        [
+            "sync",
+            "--limit",
+            "10",
+            "--delay",
+            "1.5",
+            "--cdp-url",
+            "http://127.0.0.1:9222",
+            "--html",
+            "--max-attachment-size",
+            "100MB",
+        ]
+    )
     assert args.command == "sync"
     assert args.limit == 10
     assert args.delay == 1.5
@@ -70,10 +83,12 @@ def test_cmd_list_output(tmp_path, capsys):
     )
 
     catalog = Catalog(tmp_path)
-    catalog.update([
-        CatalogItem(id="c1", title="Title 1", url="https://gemini.google.com/app/c1"),
-        CatalogItem(id="c2", title="Title 2", url="https://gemini.google.com/app/c2"),
-    ])
+    catalog.update(
+        [
+            CatalogItem(id="c1", title="Title 1", url="https://gemini.google.com/app/c1"),
+            CatalogItem(id="c2", title="Title 2", url="https://gemini.google.com/app/c2"),
+        ]
+    )
     catalog.save()
 
     parser = build_parser()
@@ -96,8 +111,10 @@ def test_max_scrolls_warning(capsys, monkeypatch):
     class DummyClient:
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             pass
+
         def list_conversations(self, **kwargs):
             return []
 
@@ -114,8 +131,10 @@ def test_cli_keyboard_interrupt(capsys, monkeypatch):
     class InterruptClient:
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             pass
+
         def list_conversations(self, **kwargs):
             raise KeyboardInterrupt()
 
@@ -133,10 +152,14 @@ def test_cli_target_closed_error(capsys, monkeypatch):
     class ClosedTabClient:
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             pass
+
         def list_conversations(self, **kwargs):
-            raise TargetClosedError("Page.query_selector_all: Target page, context or browser has been closed")
+            raise TargetClosedError(
+                "Page.query_selector_all: Target page, context or browser has been closed"
+            )
 
     monkeypatch.setattr("precious_gems.cli.entry.GeminiClient", lambda **kwargs: ClosedTabClient())
     exit_code = main(["sync"])
@@ -286,3 +309,70 @@ def test_browser_session_real_playwright_sigint_teardown(monkeypatch):
     assert session._playwright is None
 
 
+def test_build_parser_delete():
+    parser = build_parser()
+    args = parser.parse_args(["delete", "c_12345", "https://gemini.google.com/app/67890"])
+    assert args.command == "delete"
+    assert args.targets == ["c_12345", "https://gemini.google.com/app/67890"]
+    assert args.output_dir == "./output"
+    assert args.cdp_url == DEFAULT_CDP_URL
+    assert not args.delete_archived
+    assert not args.force
+
+    args_force = parser.parse_args(["delete", "123", "--delete-archived", "-f"])
+    assert args_force.delete_archived is True
+    assert args_force.force is True
+
+
+def test_cmd_delete_flow(capsys, monkeypatch, tmp_path):
+    from precious_gems.cli.entry import cmd_delete
+
+    calls = []
+
+    class DummyClient:
+        def __init__(self, cdp_url, output_dir):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def delete_conversation(self, conversation_id, delete_archived=False, force=False):
+            calls.append((conversation_id, delete_archived, force))
+            if conversation_id == "c1":
+                return {"id": "c1", "status": "deleted", "archived_deleted": delete_archived}
+            elif conversation_id == "c2":
+                return {"id": "c2", "status": "skipped", "reason": "unarchived_or_outdated"}
+            else:
+                return {"id": conversation_id, "status": "not_found"}
+
+    monkeypatch.setattr("precious_gems.cli.entry.GeminiClient", DummyClient)
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "delete",
+            "c_c1",
+            "https://gemini.google.com/app/c2",
+            "c3",
+            "--output-dir",
+            str(tmp_path),
+            "--delete-archived",
+        ]
+    )
+
+    exit_code = cmd_delete(args)
+    assert exit_code == 0
+    assert len(calls) == 3
+    assert calls[0] == ("c1", True, False)
+    assert calls[1] == ("c2", True, False)
+    assert calls[2] == ("c3", True, False)
+
+    captured = capsys.readouterr().out
+    assert "Total processed:               3" in captured
+    assert "Successfully deleted upstream: 1" in captured
+    assert "Skipped (unarchived/outdated): 1" in captured
+    assert "Not found on Gemini:           1" in captured
+    assert "Local archives purged:         1" in captured

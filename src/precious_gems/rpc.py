@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -74,11 +75,7 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
         attachments: List[Dict[str, Any]] = []
         seen_att_urls: set[str] = set()
 
-        if (
-            isinstance(entry[2], list)
-            and len(entry[2]) > 0
-            and isinstance(entry[2][0], list)
-        ):
+        if isinstance(entry[2], list) and len(entry[2]) > 0 and isinstance(entry[2][0], list):
             p0 = entry[2][0]
             user_text = p0[0] if len(p0) > 0 and isinstance(p0[0], str) else ""
 
@@ -112,31 +109,18 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                     ):
                         for item in att_grp[3]:
                             if isinstance(item, list) and len(item) > 3:
-                                fname = (
-                                    item[2]
-                                    if isinstance(item[2], str)
-                                    else "attachment"
-                                )
+                                fname = item[2] if isinstance(item[2], str) else "attachment"
                                 att_url = item[3] if isinstance(item[3], str) else None
                                 # Documents/PDFs store download endpoints in item[7]
-                                if (
-                                    not att_url
-                                    and len(item) > 7
-                                    and isinstance(item[7], list)
-                                ):
+                                if not att_url and len(item) > 7 and isinstance(item[7], list):
                                     for candidate_url in item[7]:
                                         if isinstance(candidate_url, str) and (
-                                            "contribution.usercontent.google.com"
-                                            in candidate_url
+                                            "contribution.usercontent.google.com" in candidate_url
                                             or "download" in candidate_url
                                         ):
                                             att_url = candidate_url
                                             break
-                                    if (
-                                        not att_url
-                                        and item[7]
-                                        and isinstance(item[7][0], str)
-                                    ):
+                                    if not att_url and item[7] and isinstance(item[7][0], str):
                                         att_url = item[7][0]
 
                                 if att_url and att_url not in seen_att_urls:
@@ -175,9 +159,7 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
         ):
             sec = entry[4][0]
             nanos = entry[4][1] if len(entry[4]) > 1 else 0
-            user_dt = datetime.datetime.fromtimestamp(
-                sec + nanos / 1e9, tz=datetime.timezone.utc
-            )
+            user_dt = datetime.datetime.fromtimestamp(sec + nanos / 1e9, tz=datetime.timezone.utc)
             user_timestamp = user_dt.isoformat()
             if len(entry[4]) > 2:
                 print(
@@ -192,17 +174,14 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
         model_version = None
         search_queries = []
         web_search_grounding = []
+        model_attachments = []
 
         if isinstance(entry[3], list):
             # entry[3][1] contains search queries executed during turn generation
             if len(entry[3]) > 1 and entry[3][1] is not None:
                 if isinstance(entry[3][1], list):
                     for sq in entry[3][1]:
-                        if (
-                            isinstance(sq, list)
-                            and len(sq) > 0
-                            and isinstance(sq[0], str)
-                        ):
+                        if isinstance(sq, list) and len(sq) > 0 and isinstance(sq[0], str):
                             search_queries.append(sq[0])
                         elif isinstance(sq, str):
                             search_queries.append(sq)
@@ -212,20 +191,12 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                         flush=True,
                     )
 
-            if (
-                len(entry[3]) > 0
-                and isinstance(entry[3][0], list)
-                and len(entry[3][0]) > 0
-            ):
+            if len(entry[3]) > 0 and isinstance(entry[3][0], list) and len(entry[3][0]) > 0:
                 cand_list = entry[3][0]
                 if isinstance(cand_list[0], list):
                     cand = cand_list[0]
                     if len(cand) > 1 and isinstance(cand[1], list) and len(cand[1]) > 0:
-                        model_text = (
-                            cand[1][0]
-                            if isinstance(cand[1][0], str)
-                            else str(cand[1][0])
-                        )
+                        model_text = cand[1][0] if isinstance(cand[1][0], str) else str(cand[1][0])
                     elif len(cand) > 1 and isinstance(cand[1], str):
                         model_text = cand[1]
 
@@ -237,14 +208,12 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                                 if isinstance(c_item, list) and len(c_item) > 2:
                                     phrase = (
                                         c_item[0][0]
-                                        if isinstance(c_item[0], list)
-                                        and len(c_item[0]) > 0
+                                        if isinstance(c_item[0], list) and len(c_item[0]) > 0
                                         else None
                                     )
                                     indices = (
                                         c_item[0][3]
-                                        if isinstance(c_item[0], list)
-                                        and len(c_item[0]) > 3
+                                        if isinstance(c_item[0], list) and len(c_item[0]) > 3
                                         else None
                                     )
                                     sources = []
@@ -254,15 +223,9 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                                                 sources.append(
                                                     {
                                                         "url": src[0],
-                                                        "title": (
-                                                            src[1]
-                                                            if len(src) > 1
-                                                            else None
-                                                        ),
+                                                        "title": (src[1] if len(src) > 1 else None),
                                                         "snippet": (
-                                                            src[3]
-                                                            if len(src) > 3
-                                                            else None
+                                                            src[3] if len(src) > 3 else None
                                                         ),
                                                     }
                                                 )
@@ -273,6 +236,194 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                                             "sources": sources,
                                         }
                                     )
+
+                    # Extract interactive widgets from cand[41]
+                    if len(cand) > 41 and isinstance(cand[41], list):
+                        for w_entry in cand[41]:
+                            if (
+                                isinstance(w_entry, list)
+                                and len(w_entry) > 0
+                                and isinstance(w_entry[0], str)
+                            ):
+                                w_id = w_entry[0]
+                                w_html = (
+                                    w_entry[4]
+                                    if len(w_entry) > 4 and isinstance(w_entry[4], str)
+                                    else ""
+                                )
+                                if w_html:
+                                    clean_html = w_html
+                                    if clean_html.startswith("```html\n"):
+                                        clean_html = clean_html.removeprefix("```html\n")
+                                    elif clean_html.startswith("```"):
+                                        clean_html = clean_html.split("\n", 1)[-1]
+                                    if clean_html.endswith("```"):
+                                        clean_html = clean_html.removesuffix("```").rstrip()
+
+                                    w_title = (
+                                        w_entry[9]
+                                        if len(w_entry) > 9 and isinstance(w_entry[9], str)
+                                        else None
+                                    )
+                                    model_attachments.append(
+                                        {
+                                            "filename": f"{w_id}.html",
+                                            "url": None,
+                                            "mime_type": "text/html",
+                                            "size_bytes": len(clean_html.encode("utf-8")),
+                                            "title": w_title,
+                                            "widget_id": w_id,
+                                            "html_content": clean_html,
+                                        }
+                                    )
+
+                    # Extract carousel images and model-generated images from cand[12][1]
+                    if len(cand) > 12 and isinstance(cand[12], list):
+                        if len(cand[12]) > 1 and isinstance(cand[12][1], list):
+                            for img_item in cand[12][1]:
+                                if isinstance(img_item, list) and len(img_item) > 0:
+                                    img_url = None
+                                    if (
+                                        isinstance(img_item[0], list)
+                                        and len(img_item[0]) > 0
+                                        and isinstance(img_item[0][0], list)
+                                        and img_item[0][0]
+                                        and isinstance(img_item[0][0][0], str)
+                                    ):
+                                        img_url = img_item[0][0][0]
+
+                                    tag = None
+                                    caption = None
+                                    if (
+                                        len(img_item) > 7
+                                        and isinstance(img_item[7], list)
+                                        and img_item[7]
+                                    ):
+                                        tag_str = (
+                                            img_item[7][0]
+                                            if isinstance(img_item[7][0], str)
+                                            else ""
+                                        )
+                                        tag = tag_str.split("/")[-1] if "/" in tag_str else tag_str
+                                        if len(img_item[7]) > 2 and isinstance(img_item[7][2], str):
+                                            caption = img_item[7][2]
+
+                                    attr_url = None
+                                    if (
+                                        len(img_item) > 1
+                                        and isinstance(img_item[1], list)
+                                        and img_item[1]
+                                        and isinstance(img_item[1][0], list)
+                                        and img_item[1][0]
+                                        and isinstance(img_item[1][0][0], str)
+                                    ):
+                                        attr_url = img_item[1][0][0]
+
+                                    w = (
+                                        img_item[2]
+                                        if len(img_item) > 2 and isinstance(img_item[2], int)
+                                        else None
+                                    )
+                                    h = (
+                                        img_item[3]
+                                        if len(img_item) > 3 and isinstance(img_item[3], int)
+                                        else None
+                                    )
+
+                                    fname = f"{tag}.jpg" if tag else "model_image.jpg"
+                                    if img_url:
+                                        model_attachments.append(
+                                            {
+                                                "filename": fname,
+                                                "url": img_url,
+                                                "mime_type": "image/jpeg",
+                                                "width": w,
+                                                "height": h,
+                                                "title": caption,
+                                                "attribution_url": attr_url,
+                                            }
+                                        )
+
+                        # Extract generated video from cand[12][2]["60"]
+                        if len(cand[12]) > 2 and isinstance(cand[12][2], dict):
+                            val60 = cand[12][2].get("60")
+                            if isinstance(val60, list) and val60 and isinstance(val60[0], list):
+                                for v_entry in val60[0]:
+                                    if isinstance(v_entry, list) and len(v_entry) > 0:
+                                        v_desc = None
+                                        v_meta = None
+                                        if isinstance(v_entry[0], list):
+                                            cand_desc = v_entry[0]
+                                            while (
+                                                isinstance(cand_desc, list)
+                                                and len(cand_desc) > 0
+                                                and isinstance(cand_desc[0], list)
+                                            ):
+                                                cand_desc = cand_desc[0]
+                                            v_desc = cand_desc
+                                        if (
+                                            len(v_entry) > 2
+                                            and isinstance(v_entry[2], list)
+                                            and v_entry[2]
+                                        ):
+                                            v_meta = v_entry[2]
+
+                                        if isinstance(v_desc, list) and len(v_desc) > 7:
+                                            dl_urls = (
+                                                v_desc[7] if isinstance(v_desc[7], list) else []
+                                            )
+                                            vid_url = None
+                                            for u in dl_urls:
+                                                if isinstance(u, str) and (
+                                                    "contribution.usercontent.google.com" in u
+                                                    or "download" in u
+                                                ):
+                                                    vid_url = u
+                                                    break
+                                            if (
+                                                not vid_url
+                                                and dl_urls
+                                                and isinstance(dl_urls[0], str)
+                                            ):
+                                                vid_url = dl_urls[0]
+
+                                            m_type = (
+                                                v_desc[11]
+                                                if len(v_desc) > 11 and isinstance(v_desc[11], str)
+                                                else "video/mp4"
+                                            )
+                                            tag_str = (
+                                                v_meta[0]
+                                                if v_meta and isinstance(v_meta[0], str)
+                                                else "generated_video"
+                                            )
+                                            tag = (
+                                                tag_str.split("/")[-1]
+                                                if "/" in tag_str
+                                                else tag_str
+                                            )
+                                            fname = f"{tag}.mp4"
+
+                                            vw = None
+                                            vh = None
+                                            if (
+                                                len(v_desc) > 17
+                                                and isinstance(v_desc[17], list)
+                                                and len(v_desc[17]) >= 3
+                                            ):
+                                                vw = v_desc[17][1]
+                                                vh = v_desc[17][2]
+
+                                            if vid_url:
+                                                model_attachments.append(
+                                                    {
+                                                        "filename": fname,
+                                                        "url": vid_url,
+                                                        "mime_type": m_type,
+                                                        "width": vw,
+                                                        "height": vh,
+                                                    }
+                                                )
 
             # Check candidate version history
             if len(entry[3]) > 2 and isinstance(entry[3][2], list):
@@ -289,9 +440,7 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                         )
                         candidate_history.append(
                             {
-                                "candidate_id": (
-                                    cand_entry[3] if len(cand_entry) > 3 else None
-                                ),
+                                "candidate_id": (cand_entry[3] if len(cand_entry) > 3 else None),
                                 "timestamp": c_dt.isoformat(),
                             }
                         )
@@ -317,6 +466,8 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
             "model_version": model_version,
             "edit_history": candidate_history,
         }
+        if model_attachments:
+            model_resp_data["attachments"] = model_attachments
         if search_queries:
             model_resp_data["search_queries"] = search_queries
         if web_search_grounding:
@@ -434,9 +585,11 @@ def fetch_conversation_rpc(
     raw_response = page.evaluate(js_code, target_conv_id)
     turns = extract_turns_from_response_text(raw_response)
 
-    resolved_title = title or (
+    raw_title = title or (
         turns[0]["user_prompt"]["text"][:60] if turns else "Untitled Conversation"
     )
+    cleaned_title = re.sub(r"[\r\n\t]+", " ", raw_title).strip()
+    resolved_title = re.sub(r"\s+", " ", cleaned_title) or "Untitled Conversation"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     return {
@@ -563,103 +716,111 @@ def download_conversation_files(
     used_filenames: set[str] = set()
 
     for turn in turns:
-        user_prompt = turn.get("user_prompt", {})
-        attachments = user_prompt.get("attachments", [])
-        for att in attachments:
-            url = att.get("url")
-            orig_name = att.get("filename") or "attachment"
-            if not url:
-                continue
+        for role_key in ("user_prompt", "model_response"):
+            role_data = turn.get(role_key, {})
+            attachments = role_data.get("attachments", [])
+            for att in attachments:
+                orig_name = att.get("filename") or "attachment"
+                html_content = att.get("html_content")
 
-            # Check attachment size if known
-            size_bytes = att.get("size_bytes")
-            if (
-                max_attachment_size is not None
-                and isinstance(size_bytes, (int, float))
-                and size_bytes > max_attachment_size
-            ):
-                print(
-                    f"[INFO] Skipping attachment '{orig_name}' ({size_bytes} bytes): exceeds max attachment size ({max_attachment_size} bytes)",
-                    flush=True,
-                )
-                continue
+                # Sanitize filename: replace path separators/slashes to prevent Errno 2 directory missing errors
+                safe_name = orig_name.replace("/", "_").replace("\\", "_").strip()
+                if not safe_name:
+                    safe_name = "attachment"
 
-            # Sanitize filename: replace path separators/slashes to prevent Errno 2 directory missing errors
-            safe_name = orig_name.replace("/", "_").replace("\\", "_").strip()
-            if not safe_name:
-                safe_name = "attachment"
+                # Handle conflict with special conversation files
+                stem = Path(safe_name).stem
+                suffix = Path(safe_name).suffix
+                if safe_name.lower() in (
+                    "conversation.json",
+                    "conversation.html",
+                    "meta.json",
+                ):
+                    safe_name = f"{stem} (attachment){suffix}"
+                    stem = f"{stem} (attachment)"
 
-            # Handle conflict with special conversation files
-            stem = Path(safe_name).stem
-            suffix = Path(safe_name).suffix
-            if safe_name.lower() in (
-                "conversation.json",
-                "conversation.html",
-                "meta.json",
-            ):
-                safe_name = f"{stem} (attachment){suffix}"
-                stem = f"{stem} (attachment)"
+                filename = safe_name
+                counter = 1
+                while filename in used_filenames:
+                    filename = f"{stem}_{counter}{suffix}"
+                    counter += 1
+                used_filenames.add(filename)
 
-            filename = safe_name
-            counter = 1
-            while filename in used_filenames:
-                filename = f"{stem}_{counter}{suffix}"
-                counter += 1
-            used_filenames.add(filename)
+                dest_file = conv_dir / filename
 
-            dest_file = conv_dir / filename
-            if (
-                "googleusercontent.com/gg/" in url
-                or "googleusercontent.com/test_url" in url
-            ):
-                fetch_url = url if "=s0" in url else f"{url}=s0"
-            else:
-                fetch_url = url
+                # If inline HTML content is already present (e.g. widget HTML)
+                if html_content is not None:
+                    dest_file.write_text(html_content, encoding="utf-8")
+                    att["local_path"] = filename
+                    att.pop("html_content", None)
+                    continue
 
-            downloaded = False
-            for attempt in range(max_retries):
-                try:
-                    resp = page.request.get(fetch_url, timeout=timeout_ms)
-                    if resp.status == 200:
-                        body_bytes = resp.body()
-                        if (
-                            max_attachment_size is not None
-                            and len(body_bytes) > max_attachment_size
-                        ):
-                            print(
-                                f"[INFO] Skipping attachment '{filename}' ({len(body_bytes)} bytes): exceeds max attachment size ({max_attachment_size} bytes)",
-                                flush=True,
-                            )
-                            downloaded = True
-                            break
-                        dest_file.write_bytes(body_bytes)
-                        att["local_path"] = filename
-                        downloaded = True
-                        break
-                    else:
-                        print(
-                            f"[WARNING] Attempt {attempt + 1}/{max_retries} failed downloading {filename}: HTTP {resp.status}",
-                            flush=True,
-                        )
-                except (
-                    PlaywrightError,
-                    PlaywrightTimeoutError,
-                    OSError,
-                    TimeoutError,
-                ) as err:
-                    if is_target_closed_error(err):
-                        raise
+                url = att.get("url")
+                if not url:
+                    continue
+
+                # Check attachment size if known
+                size_bytes = att.get("size_bytes")
+                if (
+                    max_attachment_size is not None
+                    and isinstance(size_bytes, (int, float))
+                    and size_bytes > max_attachment_size
+                ):
                     print(
-                        f"[WARNING] Attempt {attempt + 1}/{max_retries} error downloading {filename}: {err}",
+                        f"[INFO] Skipping attachment '{orig_name}' ({size_bytes} bytes): exceeds max attachment size ({max_attachment_size} bytes)",
                         flush=True,
                     )
+                    continue
 
-                if attempt < max_retries - 1:
-                    sleep_time = 3.0 + (attempt + 1) * 0.5
-                    time.sleep(sleep_time)
+                if "googleusercontent.com/gg/" in url or "googleusercontent.com/test_url" in url:
+                    fetch_url = url if "=s0" in url else f"{url}=s0"
+                else:
+                    fetch_url = url
 
-            if not downloaded:
-                print(
-                    f"[ERROR] Failed downloading attachment '{filename}' after {max_retries} attempts.",
-                    flush=True,
-                )
+                downloaded = False
+                for attempt in range(max_retries):
+                    try:
+                        resp = page.request.get(fetch_url, timeout=timeout_ms)
+                        if resp.status == 200:
+                            body_bytes = resp.body()
+                            if (
+                                max_attachment_size is not None
+                                and len(body_bytes) > max_attachment_size
+                            ):
+                                print(
+                                    f"[INFO] Skipping attachment '{filename}' ({len(body_bytes)} bytes): exceeds max attachment size ({max_attachment_size} bytes)",
+                                    flush=True,
+                                )
+                                downloaded = True
+                                break
+                            dest_file.write_bytes(body_bytes)
+                            att["local_path"] = filename
+                            downloaded = True
+                            break
+                        else:
+                            print(
+                                f"[WARNING] Attempt {attempt + 1}/{max_retries} failed downloading {filename}: HTTP {resp.status}",
+                                flush=True,
+                            )
+                    except (
+                        PlaywrightError,
+                        PlaywrightTimeoutError,
+                        OSError,
+                        TimeoutError,
+                    ) as err:
+                        if is_target_closed_error(err):
+                            raise
+                        print(
+                            f"[WARNING] Attempt {attempt + 1}/{max_retries} error downloading {filename}: {err}",
+                            flush=True,
+                        )
+
+                    if attempt < max_retries - 1:
+                        sleep_time = 3.0 + (attempt + 1) * 0.5
+                        time.sleep(sleep_time)
+
+                if not downloaded:
+                    print(
+                        f"[ERROR] Failed downloading attachment '{filename}' after {max_retries} attempts.",
+                        flush=True,
+                    )

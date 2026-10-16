@@ -22,32 +22,43 @@ Precious Gems (`precious_gems`) is a high-reliability extraction and backup engi
 
 ## Inviolable Operational Rules
 
-1. **No Silent Errors (No Catch-All Try/Except):**
+1. **No Silent Errors & Transparent Fail-Fast:**
    * Never write bare `except:` or `except Exception: pass`.
    * Catch specific expected exceptions (`playwright.sync_api.Error`, `TimeoutError`, `FileNotFoundError`, `KeyError`, `json.JSONDecodeError`).
-   * Fail fast: re-raise or chain exceptions (`raise SpecificError(...) from err`) preserving original tracebacks.
+   * Fail fast: unexpected errors, bad configurations, or invalid responses must crash immediately. Log diagnostic context clearly before re-raising (`raise SpecificError(...) from err`), preserving original tracebacks.
 2. **Lean Output & Context Protection:**
-   * Avoid stdout spam that bloats the LLM context window. Log only high-density technical status updates (conversation ID, title, byte size, status).
+   * Avoid stdout spam that bloats the LLM context window. Long-running progress streams must be redirected to log files in `/tmp/antigravity-scratch/precious_gems/`.
    * High-density technical communication: zero fluff, zero conversational preamble.
 3. **Port & Configuration Privacy:**
    * Never hardcode custom or private ports (e.g. 9225) as defaults in code, configuration, or documentation.
    * Default strictly to the standard Chrome remote debugging port `http://127.0.0.1:9222`. Custom ports must always be passed explicitly at runtime via `--cdp-url`.
 4. **Git Restrictions:**
-   * Never execute `git commit` or any other `git` command that modifies the filesystem. Agents are authorized to inspect status, but commit creation and staging is a reserved user action.
-5. **Test Invocation, Scoped Execution & Timing:**
-   * **Interpreter Binary:** Always invoke tests using `virtenv/bin/python -m pytest tests/ -v` (never bare `pytest` and never system `python3`). For CLI execution, use `./virtenv/bin/precious-gems` (or `virtenv/bin/python -m precious_gems.cli.entry`).
+   * Never execute `git commit` or any other `git` command that modifies repository history or branches. Agents inspect status and author journal proposals; committing and staging is a reserved user action.
+5. **Test Invocation & Timing:**
+   * **Interpreter Binary:** Always invoke tests using `virtenv/bin/python -m pytest tests/ -v` (never bare `pytest` and never system `python3`). For CLI execution, use `./virtenv/bin/precious-gems`.
    * **Timing Gate:** Never run tests prematurely before authoring code changes. Test only after completing a cohesive batch of edits, targeting solely the modified components during active iteration.
-   * **Wait Patiently:** When tests or commands are launched in the background, wait patiently for completion. Never poll in a loop. Rely strictly on reactive system notifications.
-   * **Regression Gate:** Run the test suite upon finishing an implementation plan prior to authoring the walkthrough.
-6. **Avoid Overengineering:**
-   * Do not construct complex machinery when simple, idiomatic Python suffices. Default to standard library structures (`dataclasses`, `pathlib`, `argparse`, `json`) and lean async/sync routines.
-7. **Immediate Rule Ingestion ("Remember This" Protocol):**
-   * Whenever the user intervenes with `"remember this"`, the agent must immediately update `AGENTS.md` to persist the correction or policy into the repository's operational memory.
-8. **WINE Contribution Guidelines for Proposed Commits:**
-   * All proposed git commit messages must adhere strictly to WINE project contribution standards:
-     * **Subject Line:** Format as `<component>: <One sentence in imperative mood ending with a period.>`. Concise and <= 72 characters (e.g., `extractor: Add scroll hydration loop for conversation turns.`).
-     * **Message Body:** Separated from subject by a blank line. Clear, technical imperative prose (give orders to the codebase) explaining *why* and *how*. No markdown bullets or decorative lists; wrap paragraphs to 72 columns.
-     * **Sign-Off:** Not required. Leave blank by default.
+   * **Regression Gate & Exemptions:** Run the entire test suite once upon finishing an implementation plan prior to authoring the walkthrough. Omit testing entirely for non-code workflows: documentation updates, exploratory research, or shell-only executions.
+6. **Avoid Overengineering (The "Variant" Lesson):**
+   * Default to the simplest idiomatic Python pattern that fulfills the requirement. Avoid complex metaclass dispatches or fragmented subclass hierarchies for simple data structures.
+7. **WINE Contribution Guidelines for Git Commits:**
+   * All proposed git commit messages must adhere strictly to WINE project contribution standards.
+   * **Subject Line:** Format as `<component>: <One sentence in imperative mood ending with a period.>`. Must be concise and <= 72 characters (e.g., `extractor: Add scroll hydration loop for conversation turns.`).
+   * **Message Body:** Separated from the subject by a blank line. Formatted in clear, technical imperative prose (give orders to the codebase, e.g. "Do X", not "Did X" or "This patch adds X"). Explain *why* the change was made and *how* it functions without echoing the diff.
+   * **Formatting & Wrapping:** No markdown bullets, asterisks, or decorative lists in the commit message body; use clean paragraphs wrapped to 72 columns.
+   * **Sign-Off:** Not required. Leave blank by default.
+8. **Git Commit Accumulation & Per-Turn Journaling:**
+   * At each turn where the codebase was edited, record modifications in `.git/agent/{index:03d}_{descriptive_name}.md`.
+   * Entries track changed files, rationale, and draft WINE commit messages.
+   * At pre-commit, consolidate accumulated entries and present the finalized commit proposal.
+9. **Greenfield Architecture (Zero Legacy Shims):**
+   * Greenfield project: no backward compatibility requirements.
+   * Refactor directly: do not add deprecation warnings, compatibility shims, or wrappers for obsolete APIs. Update callers in place.
+10. **Plain & Accessible Language:**
+    * Use clear, direct, and accessible English in plans, walkthroughs, user questions, code comments, and documentation.
+    * Avoid baroque vocabulary, decorative buzzwords, or convoluted phrasing. (Agent instructions and rules are exempt where dense technical shorthand is required).
+11. **Immediate Rule Ingestion ("Remember This" Protocol):**
+    * Whenever the user intervenes with `"remember this"`, the agent must immediately update `AGENTS.md` (or global rules when authorized) to persist the correction or policy into operational memory.
+
 
 ---
 

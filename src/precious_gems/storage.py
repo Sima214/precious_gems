@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +45,9 @@ def parse_size(size_str: Optional[str]) -> Optional[int]:
     }
     m = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([A-Z]*)$", s)
     if not m:
-        raise ValueError(f"Invalid size string: '{size_str}'. Expected format like '50MB', '500KB', '1000'.")
+        raise ValueError(
+            f"Invalid size string: '{size_str}'. Expected format like '50MB', '500KB', '1000'."
+        )
     val_str, unit_str = m.groups()
     val = float(val_str)
     multiplier = units.get(unit_str, 1) if unit_str else 1
@@ -99,6 +102,60 @@ class Manifest:
 
     def set_order(self, order: list[str]) -> None:
         self.order = list(order)
+
+    def mark_deleted_upstream(self, conversation_id: str, timestamp: Optional[str] = None) -> bool:
+        if conversation_id not in self.conversations:
+            return False
+        self.conversations[conversation_id]["deleted_upstream"] = True
+        self.conversations[conversation_id]["deleted_upstream_at"] = (
+            timestamp or datetime.now(timezone.utc).isoformat()
+        )
+        return True
+
+    def delete_conversation(self, conversation_id: str, delete_files: bool = False) -> bool:
+        if conversation_id not in self.conversations:
+            return False
+        record = self.conversations.pop(conversation_id)
+        if conversation_id in self.order:
+            self.order.remove(conversation_id)
+        if delete_files:
+            export_filename = record.get("export_filename")
+            if export_filename:
+                conv_dir = self.output_dir / export_filename
+                if conv_dir.exists() and conv_dir.is_dir():
+                    shutil.rmtree(conv_dir)
+        return True
+
+    def is_up_to_date(self, conversation_id: str, catalog: Optional["Catalog"] = None) -> bool:
+        if conversation_id not in self.conversations:
+            return False
+        rec = self.conversations[conversation_id]
+
+        export_filename = rec.get("export_filename")
+        if not export_filename:
+            return False
+        conv_dir = self.output_dir / export_filename
+        if not conv_dir.exists() or not conv_dir.is_dir():
+            return False
+        fmt = rec.get("format", "json")
+        conv_file = conv_dir / ("conversation.html" if fmt == "html" else "conversation.json")
+        if not conv_file.exists():
+            return False
+
+        if catalog is not None and catalog.items:
+            cat_title = catalog.get_title(conversation_id)
+            if cat_title and rec.get("title") and rec.get("title") != cat_title:
+                return False
+            if (
+                len(self.order) > 2
+                and len(catalog.conversation_ids) > 2
+                and set(self.order) == set(catalog.conversation_ids)
+            ):
+                jumped = detect_order_jumps(self.order, catalog.conversation_ids)
+                if conversation_id in jumped:
+                    return False
+
+        return True
 
     def save(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +356,20 @@ class Catalog:
                 merged.append(existing)
         self.items = merged
 
+    def remove(self, conversation_ids: list[str]) -> bool:
+        """Removes items matching conversation_ids from catalog."""
+        id_set = set(conversation_ids)
+        orig_len = len(self.items)
+        self.items = [item for item in self.items if item.id not in id_set]
+        return len(self.items) != orig_len
+
+    def get_title(self, conversation_id: str) -> Optional[str]:
+        """Returns the title for conversation_id if present in catalog."""
+        for item in self.items:
+            if item.id == conversation_id:
+                return item.title
+        return None
+
     def save(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         data = {
@@ -312,4 +383,3 @@ class Catalog:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.replace(temp_path, self.catalog_path)
-
