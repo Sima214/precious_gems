@@ -101,6 +101,30 @@ def test_cmd_list_output(tmp_path, capsys):
     assert "[Pending] c2: Title 2" in captured
 
 
+def test_cmd_list_default_exported_only(tmp_path, capsys):
+    from precious_gems.storage import Manifest, save_conversation
+    from precious_gems.cli.entry import cmd_list
+
+    manifest = Manifest(tmp_path)
+    save_conversation(
+        output_dir=tmp_path,
+        conversation_id="c1",
+        title="Title 1",
+        url="https://gemini.google.com/app/c1",
+        html_content="<p>1</p>",
+        manifest=manifest,
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(["list", "--output-dir", str(tmp_path)])
+    exit_code = cmd_list(args)
+    assert exit_code == 0
+
+    captured = capsys.readouterr().out
+    assert "Exported conversations in" in captured
+    assert "c1 (pos 0): Title 1" in captured
+
+
 def test_max_scrolls_warning(capsys, monkeypatch):
     from precious_gems.cli.entry import cmd_scan
 
@@ -266,6 +290,67 @@ def test_client_list_conversations_propagates_target_closed_error(monkeypatch):
     assert not sidebar_called
 
 
+def test_client_list_conversations_empty_rpc_does_not_call_sidebar(monkeypatch):
+    from precious_gems.client import GeminiClient
+
+    client = GeminiClient()
+    client._page = object()  # type: ignore
+
+    sidebar_called = False
+
+    def mock_rpc(page):
+        return []
+
+    def mock_sidebar(page, max_scrolls=30):
+        nonlocal sidebar_called
+        sidebar_called = True
+        return []
+
+    monkeypatch.setattr("precious_gems.client.list_conversations_rpc", mock_rpc)
+    monkeypatch.setattr("precious_gems.client.enumerate_conversations", mock_sidebar)
+
+    results = client.list_conversations(use_html_fallback=False)
+    assert results == []
+    assert not sidebar_called
+
+
+def test_client_list_conversations_rpc_error_falls_back_with_warning(capsys, monkeypatch):
+    from playwright.sync_api import Error as PlaywrightError
+    from precious_gems.client import GeminiClient
+    from precious_gems.sidebar import SidebarConversation
+
+    client = GeminiClient()
+    client._page = object()  # type: ignore
+
+    def mock_rpc(page):
+        raise PlaywrightError("Evaluation failed: Error: Missing SNlM0e token")
+
+    sidebar_called = False
+
+    def mock_sidebar(page, max_scrolls=30):
+        nonlocal sidebar_called
+        sidebar_called = True
+        return [
+            SidebarConversation(
+                id="sidebar_1", title="Sidebar Conv", url="https://gemini.google.com/app/sidebar_1"
+            )
+        ]
+
+    monkeypatch.setattr("precious_gems.client.list_conversations_rpc", mock_rpc)
+    monkeypatch.setattr("precious_gems.client.enumerate_conversations", mock_sidebar)
+
+    results = client.list_conversations(use_html_fallback=False)
+    assert len(results) == 1
+    assert results[0].id == "sidebar_1"
+    assert sidebar_called is True
+
+    stderr = capsys.readouterr().err
+    assert (
+        "[WARNING] RPC conversation enumeration failed: Evaluation failed: Error: Missing SNlM0e token"
+        in stderr
+    )
+
+
 def test_browser_session_real_playwright_sigint_teardown(monkeypatch):
     import os
     import signal
@@ -376,3 +461,169 @@ def test_cmd_delete_flow(capsys, monkeypatch, tmp_path):
     assert "Skipped (unarchived/outdated): 1" in captured
     assert "Not found on Gemini:           1" in captured
     assert "Local archives purged:         1" in captured
+
+
+def test_cmd_sync_redownloads_on_integrity_hash_mismatch(capsys, monkeypatch, tmp_path):
+    from precious_gems.cli.entry import build_parser, cmd_sync
+    from precious_gems.storage import (
+        Catalog,
+        CatalogItem,
+        ConversationRecord,
+        Manifest,
+        save_conversation_json,
+    )
+
+    manifest = Manifest(tmp_path)
+    save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="c1",
+        title="Title 1",
+        url="https://gemini.google.com/app/c1",
+        conversation_data={"turns": []},
+        manifest=manifest,
+    )
+
+    catalog = Catalog(tmp_path)
+    catalog.update([CatalogItem(id="c1", title="Title 1", url="https://gemini.google.com/app/c1")])
+    catalog.save()
+
+    # Corrupt conversation.json
+    conv_file = tmp_path / "c1_Title_1" / "conversation.json"
+    conv_file.write_text('{"tampered": true}\n', encoding="utf-8")
+
+    exported_calls = []
+
+    class DummyClient:
+        def __init__(self, cdp_url, output_dir):
+            self.manifest = manifest
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def export_conversation(self, conversation_id, title=None, **kwargs):
+            exported_calls.append(conversation_id)
+            return ConversationRecord(
+                id=conversation_id,
+                title=title or "Title 1",
+                url="https://gemini.google.com/app/c1",
+                export_filename=f"{conversation_id}_Title_1",
+                exported_at="2026-10-16T00:00:00Z",
+                size_bytes=100,
+                sha256="abc",
+            )
+
+    monkeypatch.setattr("precious_gems.cli.entry.GeminiClient", DummyClient)
+
+    parser = build_parser()
+    args = parser.parse_args(["sync", "--output-dir", str(tmp_path), "--from-cache"])
+    exit_code = cmd_sync(args)
+
+    assert exit_code == 0
+    assert exported_calls == ["c1"]
+    captured = capsys.readouterr().out
+    assert "Verifying integrity for c1..." in captured
+    assert "integrity check failed (hash_mismatch_conversation.json)" in captured
+
+
+def test_cmd_sync_silently_skips_deleted_upstream(capsys, monkeypatch, tmp_path):
+    from precious_gems.cli.entry import build_parser, cmd_sync
+    from precious_gems.storage import Catalog, CatalogItem, Manifest, save_conversation_json
+
+    manifest = Manifest(tmp_path)
+    save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="c1",
+        title="Title 1",
+        url="https://gemini.google.com/app/c1",
+        conversation_data={"turns": []},
+        manifest=manifest,
+    )
+    manifest.mark_deleted_upstream("c1")
+    manifest.save()
+
+    catalog = Catalog(tmp_path)
+    catalog.update([CatalogItem(id="c1", title="Title 1", url="https://gemini.google.com/app/c1")])
+    catalog.save()
+
+    exported_calls = []
+
+    class DummyClient:
+        def __init__(self, cdp_url, output_dir):
+            self.manifest = manifest
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def export_conversation(self, conversation_id, **kwargs):
+            exported_calls.append(conversation_id)
+
+    monkeypatch.setattr("precious_gems.cli.entry.GeminiClient", DummyClient)
+
+    parser = build_parser()
+    args = parser.parse_args(["sync", "--output-dir", str(tmp_path), "--from-cache"])
+    exit_code = cmd_sync(args)
+
+    assert exit_code == 0
+    assert exported_calls == []
+    captured = capsys.readouterr().out
+    assert "c1" not in captured
+
+
+def test_cmd_sync_ignores_multiline_whitespace_differences_in_title(capsys, monkeypatch, tmp_path):
+    from precious_gems.cli.entry import build_parser, cmd_sync
+    from precious_gems.storage import Catalog, CatalogItem, Manifest, save_conversation_json
+
+    manifest = Manifest(tmp_path)
+    save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="d2d821cc",
+        title="Fixing NVIDIA Driver GPU Lockups ### Overview of the Issue",
+        url="https://gemini.google.com/app/d2d821cc",
+        conversation_data={"turns": []},
+        manifest=manifest,
+    )
+
+    catalog = Catalog(tmp_path)
+    # Catalog contains raw multi-line string with newlines and extra spaces
+    catalog.update(
+        [
+            CatalogItem(
+                id="d2d821cc",
+                title="Fixing NVIDIA Driver GPU Lockups\n\n### Overview of the Issue\n\n",
+                url="https://gemini.google.com/app/d2d821cc",
+            )
+        ]
+    )
+    catalog.save()
+
+    exported_calls = []
+
+    class DummyClient:
+        def __init__(self, cdp_url, output_dir):
+            self.manifest = manifest
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def export_conversation(self, conversation_id, **kwargs):
+            exported_calls.append(conversation_id)
+
+    monkeypatch.setattr("precious_gems.cli.entry.GeminiClient", DummyClient)
+
+    parser = build_parser()
+    args = parser.parse_args(["sync", "--output-dir", str(tmp_path), "--from-cache"])
+    exit_code = cmd_sync(args)
+
+    assert exit_code == 0
+    assert exported_calls == []
+    captured = capsys.readouterr().out
+    assert "UPDATE: title changed" not in captured

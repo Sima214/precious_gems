@@ -8,7 +8,14 @@ from typing import List, Optional
 
 from ..browser import DEFAULT_CDP_URL, is_target_closed_error
 from ..client import GeminiClient
-from ..storage import Catalog, CatalogItem, Manifest, detect_order_jumps, parse_size
+from ..storage import (
+    Catalog,
+    CatalogItem,
+    Manifest,
+    detect_order_jumps,
+    normalize_title,
+    parse_size,
+)
 from tqdm import tqdm
 
 
@@ -138,8 +145,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 reason = "new conversation"
             else:
                 record = manifest.get_record(item.id) or {}
-                old_title = record.get("title", "")
-                if old_title and old_title != item.title:
+                if record.get("deleted_upstream"):
+                    # Silently skip upstream deleted conversations
+                    continue
+
+                old_title = normalize_title(record.get("title", ""))
+                new_title = normalize_title(item.title)
+                if old_title and old_title != new_title:
                     action = "UPDATE"
                     reason = f"title changed from '{old_title}'"
                 elif item.id in jumped_ids:
@@ -149,8 +161,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     action = "FORCE"
                     reason = "force re-export"
                 else:
-                    action = "SKIP"
-                    reason = f"unchanged relative order (pos {new_pos})"
+                    print(f"Verifying integrity for {item.id}...", flush=True)
+                    is_intact, integrity_reason = manifest.verify_conversation_integrity(item.id)
+                    if not is_intact:
+                        action = "UPDATE"
+                        reason = f"integrity check failed ({integrity_reason})"
+                    else:
+                        action = "SKIP"
+                        reason = f"unchanged relative order (pos {new_pos})"
 
             if action == "SKIP":
                 continue
@@ -197,7 +215,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     manifest = Manifest(output_dir)
     catalog = Catalog(output_dir)
 
-    if args.all or args.catalog:
+    if args.all:
         if not catalog.items:
             print(
                 f"No cached catalog found in {output_dir}. Run `scan` to discover all conversations.",
@@ -215,7 +233,9 @@ def cmd_list(args: argparse.Namespace) -> int:
                 status = "[Pending]"
             else:
                 rec = manifest.get_record(item.id) or {}
-                if rec.get("title") and rec.get("title") != item.title:
+                if rec.get("title") and normalize_title(rec.get("title")) != normalize_title(
+                    item.title
+                ):
                     status = "[Needs Update (title changed)]"
                 elif item.id in jumped_ids:
                     old_pos = (

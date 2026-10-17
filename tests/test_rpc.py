@@ -697,3 +697,94 @@ def test_download_conversation_files_with_widgets(tmp_path: Path):
     att = turns[0]["model_response"]["attachments"][0]
     assert "html_content" not in att
     assert att["local_path"] == "widget1.html"
+
+
+def test_list_conversations_rpc_evaluation():
+    from precious_gems.rpc import list_conversations_rpc
+
+    class MockPage:
+        def evaluate(self, script, arg):
+            assert arg["batchSize"] == 25
+            assert arg["maxRounds"] == 5
+            return [
+                {
+                    "id": "conv_1",
+                    "title": "  Untrimmed\nTitle\tHere  ",
+                    "url": "https://gemini.google.com/app/conv_1",
+                },
+                {
+                    "id": "conv_2",
+                    "title": "",
+                    "url": "https://gemini.google.com/app/conv_2",
+                },
+            ]
+
+    results = list_conversations_rpc(MockPage(), batch_size=25, max_rounds=5)  # type: ignore
+    assert len(results) == 2
+    assert results[0]["id"] == "conv_1"
+    assert results[0]["title"] == "Untrimmed Title Here"
+    assert results[1]["title"] == "Untitled Conversation"
+
+
+def test_list_conversations_rpc_js_parsing_logic():
+    import json
+    import subprocess
+    import shutil
+
+    if not shutil.which("node"):
+        return
+
+    # Extract the JS script from rpc.py to verify it parses correctly in Node
+    js_parser_tester = r"""
+    function parseBatchexecute(txt) {
+        let batchToken = null;
+        let batchList = [];
+        for (const line of txt.split('\n')) {
+            if (line.startsWith('[')) {
+                try {
+                    const d = JSON.parse(line);
+                    let envelopes = [];
+                    if (Array.isArray(d)) {
+                        if (d.length > 0 && Array.isArray(d[0]) && d[0].length > 0 && Array.isArray(d[0][0])) {
+                            envelopes = d[0];
+                        } else {
+                            envelopes = d;
+                        }
+                    }
+                    for (const env of envelopes) {
+                        if (Array.isArray(env) && env.length > 2 && env[0] === 'wrb.fr') {
+                            const payloadStr = env[2];
+                            if (payloadStr) {
+                                const payload = typeof payloadStr === 'string' ? JSON.parse(payloadStr) : payloadStr;
+                                if (payload && Array.isArray(payload)) {
+                                    batchToken = payload[1] || null;
+                                    batchList = payload[2] || [];
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }
+        }
+        return { batchToken, batchList };
+    }
+
+    const payload = JSON.stringify([null, "cursor_xyz", [["c_100", "Conv 100", null, 1790000000]]]);
+    const response2Level = ")]}'\n\n123\n" + JSON.stringify([["wrb.fr", "MaZiqc", payload, null, "generic"]]) + "\n";
+    const response3Level = ")]}'\n\n123\n" + JSON.stringify([[["wrb.fr", "MaZiqc", payload, null, "generic"]]]) + "\n";
+
+    const res2 = parseBatchexecute(response2Level);
+    const res3 = parseBatchexecute(response3Level);
+
+    if (res2.batchToken !== "cursor_xyz" || res2.batchList.length !== 1) {
+        process.exit(1);
+    }
+    if (res3.batchToken !== "cursor_xyz" || res3.batchList.length !== 1) {
+        process.exit(2);
+    }
+    console.log("OK");
+    """
+
+    res = subprocess.run(["node", "-e", js_parser_tester], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node test failed: stdout={res.stdout}, stderr={res.stderr}"
+    assert "OK" in res.stdout

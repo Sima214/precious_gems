@@ -5,14 +5,22 @@ import json
 import os
 import re
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-def slugify(text: str, max_length: int = 60) -> str:
-    """Generate a clean filesystem-friendly slug from title, preserving alphanumeric chars."""
+def normalize_title(text: Optional[str]) -> str:
+    """Normalizes whitespace and newlines in conversation titles into single spaces."""
+    if not text:
+        return "Untitled Conversation"
+    cleaned = re.sub(r"[\r\n\t]+", " ", str(text)).strip()
+    return re.sub(r"\s+", " ", cleaned) or "Untitled Conversation"
+
+
+def slugify(text: str, max_length: int = 40) -> str:
+    """Generate a clean filesystem-friendly slug from title, preserving alphanumeric chars and breaking at word boundaries."""
     if not text:
         return "untitled"
     # Replace whitespace and problematic characters with underscores
@@ -20,7 +28,14 @@ def slugify(text: str, max_length: int = 60) -> str:
     cleaned = re.sub(r"_+", "_", cleaned).strip("._")
     if not cleaned:
         return "untitled"
-    return cleaned[:max_length].rstrip("._")
+    if len(cleaned) <= max_length:
+        return cleaned.rstrip("._")
+    truncated = cleaned[:max_length]
+    # Break at last word boundary (_, -, .) before max_length if possible
+    last_delim = max(truncated.rfind("_"), truncated.rfind("-"), truncated.rfind("."))
+    if last_delim > 0:
+        return truncated[:last_delim].rstrip("._")
+    return truncated.rstrip("._")
 
 
 def parse_size(size_str: Optional[str]) -> Optional[int]:
@@ -64,6 +79,8 @@ class ConversationRecord:
     size_bytes: int
     sha256: str
     format: str = "json"
+    attachments: Dict[str, str] = field(default_factory=dict)
+    turn_timestamp: Optional[str] = None
 
 
 class Manifest:
@@ -76,6 +93,7 @@ class Manifest:
         self.order: list[str] = []
         self.version = 1
         self._load()
+        self.rescan_filesystem_locations()
 
     def _load(self) -> None:
         if not self.manifest_path.exists():
@@ -88,6 +106,109 @@ class Manifest:
             self.order = data.get("order", list(self.conversations.keys()))
         except json.JSONDecodeError as err:
             raise RuntimeError(f"Corrupted manifest at {self.manifest_path}") from err
+
+    def rescan_filesystem_locations(self) -> None:
+        """Recursively scans output_dir to detect moved conversation directories containing meta.json.
+        Fails fast if duplicate folders for the same conversation ID are detected.
+        """
+        if not self.output_dir.exists() or not self.output_dir.is_dir():
+            return
+
+        seen_locations: Dict[str, Path] = {}
+        found_convs: Dict[str, tuple[str, Dict[str, Any]]] = {}
+
+        for meta_path in self.output_dir.rglob("meta.json"):
+            if not meta_path.is_file():
+                continue
+            conv_dir = meta_path.parent
+            if conv_dir == self.output_dir:
+                continue
+            if any(part.endswith(".tmp") for part in conv_dir.parts):
+                continue
+
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta_data = json.load(f)
+            except (json.JSONDecodeError, OSError) as err:
+                raise RuntimeError(f"Corrupted metadata file at {meta_path}") from err
+
+            conv_id = meta_data.get("id")
+            if not conv_id:
+                continue
+
+            if conv_id in seen_locations:
+                first_path = seen_locations[conv_id].relative_to(self.output_dir).as_posix()
+                second_path = conv_dir.relative_to(self.output_dir).as_posix()
+                raise RuntimeError(
+                    f"Duplicate conversation folder detected for ID '{conv_id}': "
+                    f"'{first_path}' and '{second_path}'"
+                )
+
+            seen_locations[conv_id] = conv_dir
+            rel_path = conv_dir.relative_to(self.output_dir).as_posix()
+            found_convs[conv_id] = (rel_path, meta_data)
+
+        dirty = False
+        for conv_id, (rel_path, meta_data) in found_convs.items():
+            if conv_id in self.conversations:
+                if self.conversations[conv_id].get("export_filename") != rel_path:
+                    self.conversations[conv_id]["export_filename"] = rel_path
+                    dirty = True
+            else:
+                meta_data["export_filename"] = rel_path
+                self.conversations[conv_id] = meta_data
+                if conv_id not in self.order:
+                    self.order.append(conv_id)
+                dirty = True
+
+        if dirty:
+            self.save()
+
+    def verify_conversation_integrity(self, conversation_id: str) -> tuple[bool, str]:
+        """Verifies on-disk files and SHA-256 hashes against manifest records.
+        Filesystem-bound: returns (is_valid, reason).
+        """
+        if conversation_id not in self.conversations:
+            return False, "not_in_manifest"
+
+        rec = self.conversations[conversation_id]
+        export_filename = rec.get("export_filename")
+        if not export_filename:
+            return False, "missing_export_filename"
+
+        conv_dir = self.output_dir / export_filename
+        if not conv_dir.exists() or not conv_dir.is_dir():
+            return False, "missing_directory"
+
+        fmt = rec.get("format", "json")
+        primary_name = "conversation.html" if fmt == "html" else "conversation.json"
+        primary_file = conv_dir / primary_name
+        if not primary_file.exists() or not primary_file.is_file():
+            return False, f"missing_file_{primary_name}"
+
+        try:
+            with open(primary_file, "rb") as f:
+                primary_sha = hashlib.sha256(f.read()).hexdigest()
+        except OSError as err:
+            return False, f"unreadable_{primary_name}_{err}"
+
+        if rec.get("sha256") and primary_sha != rec["sha256"]:
+            return False, f"hash_mismatch_{primary_name}"
+
+        attachments = rec.get("attachments") or {}
+        for att_name, expected_sha in attachments.items():
+            att_file = conv_dir / att_name
+            if not att_file.exists() or not att_file.is_file():
+                return False, f"missing_attachment_{att_name}"
+            try:
+                with open(att_file, "rb") as f:
+                    att_sha = hashlib.sha256(f.read()).hexdigest()
+            except OSError as err:
+                return False, f"unreadable_attachment_{att_name}_{err}"
+            if expected_sha and att_sha != expected_sha:
+                return False, f"hash_mismatch_{att_name}"
+
+        return True, "ok"
 
     def has_conversation(self, conversation_id: str) -> bool:
         return conversation_id in self.conversations
@@ -131,20 +252,17 @@ class Manifest:
             return False
         rec = self.conversations[conversation_id]
 
-        export_filename = rec.get("export_filename")
-        if not export_filename:
-            return False
-        conv_dir = self.output_dir / export_filename
-        if not conv_dir.exists() or not conv_dir.is_dir():
-            return False
-        fmt = rec.get("format", "json")
-        conv_file = conv_dir / ("conversation.html" if fmt == "html" else "conversation.json")
-        if not conv_file.exists():
+        is_intact, _ = self.verify_conversation_integrity(conversation_id)
+        if not is_intact:
             return False
 
         if catalog is not None and catalog.items:
             cat_title = catalog.get_title(conversation_id)
-            if cat_title and rec.get("title") and rec.get("title") != cat_title:
+            if (
+                cat_title
+                and rec.get("title")
+                and normalize_title(rec.get("title")) != normalize_title(cat_title)
+            ):
                 return False
             if (
                 len(self.order) > 2
@@ -172,6 +290,55 @@ class Manifest:
         os.replace(temp_path, self.manifest_path)
 
 
+def apply_filesystem_timestamps(conv_dir: Path, timestamp_str: Optional[str]) -> None:
+    """Sets filesystem atime and mtime on all files inside conv_dir and the directory itself."""
+    if not timestamp_str or not conv_dir.exists():
+        return
+    try:
+        dt = datetime.fromisoformat(timestamp_str)
+        epoch = dt.timestamp()
+    except (ValueError, TypeError):
+        return
+
+    for item in conv_dir.rglob("*"):
+        if item.is_file():
+            try:
+                os.utime(item, (epoch, epoch))
+            except OSError:
+                pass
+    try:
+        os.utime(conv_dir, (epoch, epoch))
+    except OSError:
+        pass
+
+
+def resolve_conversation_dir(
+    output_dir: Path,
+    conversation_id: str,
+    title: str,
+    manifest: Manifest,
+) -> tuple[Path, str]:
+    """Determines target folder and relative export_filename, renaming leaf folder if title changed."""
+    slug = slugify(normalize_title(title))
+    leaf_name = f"{conversation_id}_{slug}"
+
+    if manifest.has_conversation(conversation_id):
+        rec = manifest.get_record(conversation_id) or {}
+        old_rel = rec.get("export_filename")
+        if old_rel:
+            old_path = output_dir / old_rel
+            if old_path.exists() and old_path.is_dir():
+                parent_dir = old_path.parent
+                new_conv_dir = parent_dir / leaf_name
+                if old_path != new_conv_dir:
+                    old_path.rename(new_conv_dir)
+                rel_path = new_conv_dir.relative_to(output_dir).as_posix()
+                return new_conv_dir, rel_path
+
+    conv_dir = output_dir / leaf_name
+    return conv_dir, leaf_name
+
+
 def save_conversation(
     output_dir: Path,
     conversation_id: str,
@@ -179,11 +346,13 @@ def save_conversation(
     url: str,
     html_content: str,
     manifest: Manifest,
+    turn_timestamp: Optional[str] = None,
 ) -> ConversationRecord:
     """Saves conversation HTML, companion metadata, and updates the manifest atomically inside the conversation folder."""
-    slug = slugify(title)
-    base_filename = f"{conversation_id}_{slug}"
-    conv_dir = output_dir / base_filename
+    norm_title = normalize_title(title)
+    conv_dir, base_filename = resolve_conversation_dir(
+        output_dir, conversation_id, norm_title, manifest
+    )
     conv_dir.mkdir(parents=True, exist_ok=True)
 
     html_filename = "conversation.html"
@@ -204,13 +373,14 @@ def save_conversation(
 
     record = ConversationRecord(
         id=conversation_id,
-        title=title,
+        title=norm_title,
         url=url,
         export_filename=base_filename,
         exported_at=now_iso,
         size_bytes=len(html_bytes),
         sha256=sha256_hash,
         format="html",
+        turn_timestamp=turn_timestamp,
     )
 
     # Atomic write for metadata
@@ -222,6 +392,7 @@ def save_conversation(
 
     manifest.add_record(record)
     manifest.save()
+    apply_filesystem_timestamps(conv_dir, turn_timestamp or now_iso)
 
     return record
 
@@ -233,11 +404,14 @@ def save_conversation_json(
     url: str,
     conversation_data: Dict[str, Any],
     manifest: Manifest,
+    attachments: Optional[Dict[str, str]] = None,
+    turn_timestamp: Optional[str] = None,
 ) -> ConversationRecord:
     """Saves conversation JSON, companion metadata, and updates the manifest atomically inside the conversation folder."""
-    slug = slugify(title)
-    base_filename = f"{conversation_id}_{slug}"
-    conv_dir = output_dir / base_filename
+    norm_title = normalize_title(title)
+    conv_dir, base_filename = resolve_conversation_dir(
+        output_dir, conversation_id, norm_title, manifest
+    )
     conv_dir.mkdir(parents=True, exist_ok=True)
 
     json_filename = "conversation.json"
@@ -259,13 +433,15 @@ def save_conversation_json(
 
     record = ConversationRecord(
         id=conversation_id,
-        title=title,
+        title=norm_title,
         url=url,
         export_filename=base_filename,
         exported_at=now_iso,
         size_bytes=len(json_bytes),
         sha256=sha256_hash,
         format="json",
+        attachments=attachments or {},
+        turn_timestamp=turn_timestamp,
     )
 
     # Atomic write for metadata
@@ -277,6 +453,7 @@ def save_conversation_json(
 
     manifest.add_record(record)
     manifest.save()
+    apply_filesystem_timestamps(conv_dir, turn_timestamp or now_iso)
 
     return record
 
@@ -329,7 +506,7 @@ class Catalog:
             self.items = [
                 CatalogItem(
                     id=item["id"],
-                    title=item["title"],
+                    title=normalize_title(item.get("title")),
                     url=item["url"],
                 )
                 for item in raw_items
@@ -347,13 +524,17 @@ class Catalog:
         seen = set()
         merged: list[CatalogItem] = []
         for c in conversations:
-            if c.id not in seen:
-                seen.add(c.id)
-                merged.append(c)
+            norm_item = CatalogItem(id=c.id, title=normalize_title(c.title), url=c.url)
+            if norm_item.id not in seen:
+                seen.add(norm_item.id)
+                merged.append(norm_item)
         for existing in self.items:
-            if existing.id not in seen:
-                seen.add(existing.id)
-                merged.append(existing)
+            norm_existing = CatalogItem(
+                id=existing.id, title=normalize_title(existing.title), url=existing.url
+            )
+            if norm_existing.id not in seen:
+                seen.add(norm_existing.id)
+                merged.append(norm_existing)
         self.items = merged
 
     def remove(self, conversation_ids: list[str]) -> bool:
@@ -367,7 +548,7 @@ class Catalog:
         """Returns the title for conversation_id if present in catalog."""
         for item in self.items:
             if item.id == conversation_id:
-                return item.title
+                return normalize_title(item.title)
         return None
 
     def save(self) -> None:

@@ -1,5 +1,6 @@
 """Public library client interface for Precious Gems."""
 
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.sync_api import Error as PlaywrightError, Page
@@ -7,12 +8,18 @@ from playwright.sync_api import Error as PlaywrightError, Page
 from .browser import DEFAULT_CDP_URL, BrowserSession, is_target_closed_error
 from .deletion import delete_conversation_dom
 from .extractor import extract_conversation
-from .rpc import download_conversation_files, fetch_conversation_rpc, list_conversations_rpc
+from .rpc import (
+    download_conversation_files,
+    extract_latest_timestamp,
+    fetch_conversation_rpc,
+    list_conversations_rpc,
+)
 from .sidebar import SidebarConversation, enumerate_conversations
 from .storage import (
     Catalog,
     ConversationRecord,
     Manifest,
+    resolve_conversation_dir,
     save_conversation,
     save_conversation_json,
     slugify,
@@ -79,21 +86,22 @@ class GeminiClient:
         if not use_html_fallback:
             try:
                 rpc_items = list_conversations_rpc(self.page)
-                if rpc_items:
-                    return [
-                        SidebarConversation(
-                            id=item["id"],
-                            title=item["title"],
-                            url=item["url"],
-                        )
-                        for item in rpc_items
-                    ]
+                return [
+                    SidebarConversation(
+                        id=item["id"],
+                        title=item["title"],
+                        url=item["url"],
+                    )
+                    for item in rpc_items
+                ]
             except PlaywrightError as err:
                 if is_target_closed_error(err):
                     raise
-                # If RPC fails or token shifts, gracefully fall back to sidebar scraping
-            except (KeyError, TypeError, ValueError):
-                pass
+                print(
+                    f"[WARNING] RPC conversation enumeration failed: {err}. Falling back to sidebar DOM.",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         return enumerate_conversations(self.page, max_scrolls=max_scrolls)
 
@@ -136,13 +144,17 @@ class GeminiClient:
             )
 
         # Download any conversation attachments in the browser session
-        base_filename = f"{slug}_{slugify(resolved_title)}"
-        download_conversation_files(
+        latest_ts = extract_latest_timestamp(data.get("turns", []))
+        _, base_filename = resolve_conversation_dir(
+            self.output_dir, slug, resolved_title, self.manifest
+        )
+        attachment_hashes = download_conversation_files(
             page=self.page,
             output_dir=self.output_dir,
             export_filename=base_filename,
             turns=data.get("turns", []),
             max_attachment_size=max_attachment_size,
+            timestamp_iso=latest_ts,
         )
 
         return save_conversation_json(
@@ -152,6 +164,8 @@ class GeminiClient:
             url=url,
             conversation_data=data,
             manifest=self.manifest,
+            attachments=attachment_hashes,
+            turn_timestamp=latest_ts,
         )
 
     def delete_conversation(

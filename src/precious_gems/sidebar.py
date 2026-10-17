@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from .storage import normalize_title
+
 
 @dataclass
 class SidebarConversation:
@@ -83,8 +85,7 @@ def enumerate_conversations(page: Page, max_scrolls: int = 30) -> List[SidebarCo
                 continue
 
             raw_title = anchor.inner_text().strip()
-            # Clean up potential UI badges or trailing actions in anchor text
-            title = raw_title.split("\n")[0].strip() or "Untitled Conversation"
+            title = normalize_title(raw_title)
             canonical_url = f"https://gemini.google.com/app/{conv_id}"
 
             seen_ids.add(conv_id)

@@ -1,7 +1,9 @@
 """Backend RPC extraction and turn parser for Gemini conversations."""
 
 import datetime
+import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -14,6 +16,7 @@ from playwright.sync_api import (
 )
 
 from .browser import is_target_closed_error
+from .storage import normalize_title
 
 
 def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
@@ -588,8 +591,7 @@ def fetch_conversation_rpc(
     raw_title = title or (
         turns[0]["user_prompt"]["text"][:60] if turns else "Untitled Conversation"
     )
-    cleaned_title = re.sub(r"[\r\n\t]+", " ", raw_title).strip()
-    resolved_title = re.sub(r"\s+", " ", cleaned_title) or "Untitled Conversation"
+    resolved_title = normalize_title(raw_title)
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     return {
@@ -608,7 +610,7 @@ def list_conversations_rpc(
     max_rounds: int = 25,
 ) -> List[Dict[str, Any]]:
     """Lists all conversations directly via Gemini's MaZiqc batchexecute RPC, eliminating sidebar scrolling."""
-    js_code = """
+    js_code = r"""
     async ({ batchSize, maxRounds }) => {
         const wiz = window.WIZ_global_data || {};
         const atToken = wiz['SNlM0e'];
@@ -662,14 +664,29 @@ def list_conversations_rpc(
             let batchToken = null;
             let batchList = [];
 
-            for (const line of txt.split('\\n')) {
+            for (const line of txt.split('\n')) {
                 if (line.startsWith('[')) {
                     try {
                         const d = JSON.parse(line);
-                        if (Array.isArray(d) && d.length > 0 && d[0][0] === 'wrb.fr') {
-                            const payload = JSON.parse(d[0][2]);
-                            batchToken = payload[1];
-                            batchList = payload[2] || [];
+                        let envelopes = [];
+                        if (Array.isArray(d)) {
+                            if (d.length > 0 && Array.isArray(d[0]) && d[0].length > 0 && Array.isArray(d[0][0])) {
+                                envelopes = d[0];
+                            } else {
+                                envelopes = d;
+                            }
+                        }
+                        for (const env of envelopes) {
+                            if (Array.isArray(env) && env.length > 2 && env[0] === 'wrb.fr') {
+                                const payloadStr = env[2];
+                                if (payloadStr) {
+                                    const payload = typeof payloadStr === 'string' ? JSON.parse(payloadStr) : payloadStr;
+                                    if (payload && Array.isArray(payload)) {
+                                        batchToken = payload[1] || null;
+                                        batchList = payload[2] || [];
+                                    }
+                                }
+                            }
                         }
                     } catch(e) {}
                 }
@@ -679,9 +696,11 @@ def list_conversations_rpc(
                 if (Array.isArray(item) && item.length >= 2) {
                     const rawId = String(item[0]);
                     const cleanId = rawId.replace(/^c_/, '');
+                    const rawTitle = item[1] || 'Untitled Conversation';
+                    const cleanTitle = rawTitle.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
                     allConversations.push({
                         id: cleanId,
-                        title: item[1] || 'Untitled Conversation',
+                        title: cleanTitle || 'Untitled Conversation',
                         url: 'https://gemini.google.com/app/' + cleanId
                     });
                 }
@@ -698,7 +717,27 @@ def list_conversations_rpc(
     """
 
     results = page.evaluate(js_code, {"batchSize": batch_size, "maxRounds": max_rounds})
+    for r in results:
+        r["title"] = normalize_title(r.get("title"))
     return results
+
+
+def extract_latest_timestamp(turns: List[Dict[str, Any]]) -> Optional[str]:
+    """Finds the most recent ISO timestamp among user prompts and model responses across turns."""
+    timestamps: List[datetime.datetime] = []
+    for turn in turns:
+        for role in ("user_prompt", "model_response"):
+            ts_str = turn.get(role, {}).get("timestamp")
+            if ts_str and isinstance(ts_str, str):
+                try:
+                    dt = datetime.datetime.fromisoformat(ts_str)
+                    timestamps.append(dt)
+                except (ValueError, TypeError):
+                    pass
+    if not timestamps:
+        return None
+    latest_dt = max(timestamps)
+    return latest_dt.isoformat()
 
 
 def download_conversation_files(
@@ -709,11 +748,22 @@ def download_conversation_files(
     max_attachment_size: Optional[int] = None,
     max_retries: int = 3,
     timeout_ms: int = 120000,
-) -> None:
-    """Downloads all conversation attachments into the conversation folder with retry logic and size filtering."""
+    timestamp_iso: Optional[str] = None,
+) -> Dict[str, str]:
+    """Downloads all conversation attachments into the conversation folder with retry logic and size filtering.
+    Returns mapping of attachment filenames to their SHA-256 hashes.
+    """
     conv_dir = output_dir / export_filename
     conv_dir.mkdir(parents=True, exist_ok=True)
     used_filenames: set[str] = set()
+    attachment_hashes: Dict[str, str] = {}
+
+    epoch: Optional[float] = None
+    if timestamp_iso:
+        try:
+            epoch = datetime.datetime.fromisoformat(timestamp_iso).timestamp()
+        except (ValueError, TypeError):
+            epoch = None
 
     for turn in turns:
         for role_key in ("user_prompt", "model_response"):
@@ -751,6 +801,13 @@ def download_conversation_files(
                 # If inline HTML content is already present (e.g. widget HTML)
                 if html_content is not None:
                     dest_file.write_text(html_content, encoding="utf-8")
+                    h = hashlib.sha256(html_content.encode("utf-8")).hexdigest()
+                    attachment_hashes[filename] = h
+                    if epoch is not None:
+                        try:
+                            os.utime(dest_file, (epoch, epoch))
+                        except OSError:
+                            pass
                     att["local_path"] = filename
                     att.pop("html_content", None)
                     continue
@@ -794,6 +851,13 @@ def download_conversation_files(
                                 downloaded = True
                                 break
                             dest_file.write_bytes(body_bytes)
+                            h = hashlib.sha256(body_bytes).hexdigest()
+                            attachment_hashes[filename] = h
+                            if epoch is not None:
+                                try:
+                                    os.utime(dest_file, (epoch, epoch))
+                                except OSError:
+                                    pass
                             att["local_path"] = filename
                             downloaded = True
                             break
@@ -824,3 +888,5 @@ def download_conversation_files(
                         f"[ERROR] Failed downloading attachment '{filename}' after {max_retries} attempts.",
                         flush=True,
                     )
+
+    return attachment_hashes

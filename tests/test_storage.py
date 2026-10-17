@@ -11,6 +11,25 @@ def test_slugify():
     assert slugify("   leading and trailing   ") == "leading_and_trailing"
     assert slugify("Ελληνικός τίτλος συνομιλίας") == "Ελληνικός_τίτλος_συνομιλίας"
     assert slugify("") == "untitled"
+    # Word boundary truncation tests at 40 chars
+    long_title = (
+        "Fixing NVIDIA Driver GPU Lockups, TLB Invalidation Failures, and Soft Lockups in Linux"
+    )
+    slug = slugify(long_title)
+    assert len(slug) <= 40
+    assert slug == "Fixing_NVIDIA_Driver_GPU_Lockups_TLB"
+    # Single long word with no delimiter falls back to slicing at 40 chars
+    long_word = "A" * 50
+    assert slugify(long_word) == "A" * 40
+
+
+def test_normalize_title():
+    from precious_gems.storage import normalize_title
+
+    assert normalize_title("Hello\n\nWorld") == "Hello World"
+    assert normalize_title("Multi\r\n\tLine   Spacing\nTest") == "Multi Line Spacing Test"
+    assert normalize_title(None) == "Untitled Conversation"
+    assert normalize_title("") == "Untitled Conversation"
 
 
 def test_parse_size():
@@ -268,7 +287,17 @@ def test_manifest_is_up_to_date(tmp_path: Path):
     assert manifest.is_up_to_date("conv1", catalog=catalog)
     assert not manifest.is_up_to_date("conv2", catalog=catalog)
 
-    # Title changed in catalog
+    # Title with newlines and extra spaces in catalog matches normalized title in manifest
+    catalog.update(
+        [
+            CatalogItem(
+                id="conv1", title="Original\n\nTitle\t ", url="https://gemini.google.com/app/conv1"
+            )
+        ]
+    )
+    assert manifest.is_up_to_date("conv1", catalog=catalog)
+
+    # Title truly changed in catalog
     catalog.update(
         [CatalogItem(id="conv1", title="Changed Title", url="https://gemini.google.com/app/conv1")]
     )
@@ -294,3 +323,168 @@ def test_catalog_remove_and_get_title(tmp_path: Path):
     assert len(catalog.items) == 1
     assert catalog.get_title("c1") is None
     assert not catalog.remove(["c1"])
+
+
+def test_manifest_rescan_detects_nested_subdirectories(tmp_path: Path):
+    manifest = Manifest(tmp_path)
+    rec = save_conversation(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Original Title",
+        url="https://gemini.google.com/app/conv1",
+        html_content="<p>1</p>",
+        manifest=manifest,
+    )
+
+    orig_dir = tmp_path / rec.export_filename
+    assert orig_dir.exists()
+
+    # Move folder into nested subdirectories
+    nested_dir = tmp_path / "work" / "category" / rec.export_filename
+    nested_dir.parent.mkdir(parents=True, exist_ok=True)
+    orig_dir.rename(nested_dir)
+
+    # Re-initialize manifest: should auto-detect new location
+    manifest2 = Manifest(tmp_path)
+    assert manifest2.has_conversation("conv1")
+    rec2 = manifest2.get_record("conv1")
+    assert rec2["export_filename"] == "work/category/conv1_Original_Title"
+    assert manifest2.is_up_to_date("conv1")
+
+
+def test_manifest_rescan_aborts_on_duplicate_ids(tmp_path: Path):
+    import pytest
+    from precious_gems.storage import save_conversation_json
+
+    manifest = Manifest(tmp_path)
+    save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Original",
+        url="https://gemini.google.com/app/conv1",
+        conversation_data={"turns": []},
+        manifest=manifest,
+    )
+
+    # Create a duplicate folder in a subfolder with same meta.json
+    dup_dir = tmp_path / "dup_subfolder" / "conv1_Copy"
+    dup_dir.mkdir(parents=True, exist_ok=True)
+    meta_src = tmp_path / "conv1_Original" / "meta.json"
+    (dup_dir / "meta.json").write_text(meta_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Duplicate conversation folder detected for ID 'conv1'"):
+        Manifest(tmp_path)
+
+
+def test_manifest_verify_conversation_integrity(tmp_path: Path):
+    import hashlib
+    from precious_gems.storage import save_conversation_json
+
+    manifest = Manifest(tmp_path)
+    att_file = "image.png"
+    att_bytes = b"fake-png-data"
+    att_sha = hashlib.sha256(att_bytes).hexdigest()
+
+    rec = save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Check Integrity",
+        url="https://gemini.google.com/app/conv1",
+        conversation_data={"turns": []},
+        manifest=manifest,
+        attachments={att_file: att_sha},
+    )
+
+    conv_dir = tmp_path / rec.export_filename
+    (conv_dir / att_file).write_bytes(att_bytes)
+
+    # Valid check
+    is_valid, reason = manifest.verify_conversation_integrity("conv1")
+    assert is_valid is True
+    assert reason == "ok"
+
+    # Corrupt attachment
+    (conv_dir / att_file).write_bytes(b"corrupted-data")
+    is_valid, reason = manifest.verify_conversation_integrity("conv1")
+    assert is_valid is False
+    assert "hash_mismatch_image.png" in reason
+
+    # Missing attachment
+    (conv_dir / att_file).unlink()
+    is_valid, reason = manifest.verify_conversation_integrity("conv1")
+    assert is_valid is False
+    assert "missing_attachment_image.png" in reason
+
+    # Restore attachment, corrupt primary conversation.json
+    (conv_dir / att_file).write_bytes(att_bytes)
+    (conv_dir / "conversation.json").write_text('{"corrupted": true}\n', encoding="utf-8")
+    is_valid, reason = manifest.verify_conversation_integrity("conv1")
+    assert is_valid is False
+    assert "hash_mismatch_conversation.json" in reason
+
+
+def test_save_conversation_preserves_subfolder_and_renames_leaf(tmp_path: Path):
+    from precious_gems.storage import save_conversation_json
+
+    manifest = Manifest(tmp_path)
+    save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Title One",
+        url="https://gemini.google.com/app/conv1",
+        conversation_data={"turns": []},
+        manifest=manifest,
+    )
+
+    # Move to subfolder
+    subfolder = tmp_path / "deep" / "archive"
+    subfolder.mkdir(parents=True, exist_ok=True)
+    orig_dir = tmp_path / "conv1_Title_One"
+    moved_dir = subfolder / "conv1_Title_One"
+    orig_dir.rename(moved_dir)
+
+    # Rescan
+    manifest.rescan_filesystem_locations()
+    assert manifest.get_record("conv1")["export_filename"] == "deep/archive/conv1_Title_One"
+
+    # Update conversation with a new title
+    rec_updated = save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Title Two",
+        url="https://gemini.google.com/app/conv1",
+        conversation_data={"turns": ["new"]},
+        manifest=manifest,
+    )
+
+    # Should rename leaf inside deep/archive
+    assert rec_updated.export_filename == "deep/archive/conv1_Title_Two"
+    assert (subfolder / "conv1_Title_Two").exists()
+    assert not (subfolder / "conv1_Title_One").exists()
+
+
+def test_apply_filesystem_timestamps(tmp_path: Path):
+    import os
+    from datetime import datetime, timezone
+    from precious_gems.storage import save_conversation_json
+
+    manifest = Manifest(tmp_path)
+    fixed_ts = "2026-05-15T10:30:00+00:00"
+    rec = save_conversation_json(
+        output_dir=tmp_path,
+        conversation_id="conv1",
+        title="Timestamp Test",
+        url="https://gemini.google.com/app/conv1",
+        conversation_data={"turns": []},
+        manifest=manifest,
+        turn_timestamp=fixed_ts,
+    )
+
+    expected_epoch = datetime.fromisoformat(fixed_ts).timestamp()
+    conv_dir = tmp_path / rec.export_filename
+    conv_file = conv_dir / "conversation.json"
+    meta_file = conv_dir / "meta.json"
+
+    assert abs(os.stat(conv_file).st_mtime - expected_epoch) < 1.0
+    assert abs(os.stat(meta_file).st_mtime - expected_epoch) < 1.0
+    assert abs(os.stat(conv_dir).st_mtime - expected_epoch) < 1.0
