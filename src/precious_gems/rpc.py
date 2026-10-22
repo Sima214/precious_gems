@@ -428,6 +428,138 @@ def parse_rpc_payload(payload: list) -> List[Dict[str, Any]]:
                                                     }
                                                 )
 
+                        # Extract generated images and thought signatures from cand[12][7]
+                        if len(cand[12]) > 7 and isinstance(cand[12][7], list) and cand[12][7]:
+                            gen_img_list = cand[12][7][0]
+                            if isinstance(gen_img_list, list):
+                                for gen_entry in gen_img_list:
+                                    if not isinstance(gen_entry, list) or len(gen_entry) == 0:
+                                        continue
+
+                                    image_id = (
+                                        gen_entry[8]
+                                        if len(gen_entry) > 8 and isinstance(gen_entry[8], str)
+                                        else None
+                                    )
+
+                                    placeholder_url = None
+                                    if (
+                                        len(gen_entry) > 1
+                                        and isinstance(gen_entry[1], list)
+                                        and gen_entry[1]
+                                        and isinstance(gen_entry[1][0], str)
+                                    ):
+                                        placeholder_url = gen_entry[1][0]
+
+                                    model_name = None
+                                    thought_entry = None
+                                    if len(gen_entry) > 3 and isinstance(gen_entry[3], list):
+                                        meta3 = gen_entry[3]
+                                        if len(meta3) > 18 and isinstance(meta3[18], str):
+                                            model_name = meta3[18]
+                                        if len(meta3) > 22 and isinstance(meta3[22], list):
+                                            thought_entry = meta3[22]
+
+                                    img_info = None
+                                    curr = gen_entry[0]
+                                    while isinstance(curr, list) and len(curr) > 0:
+                                        if len(curr) > 3 and isinstance(curr[3], list):
+                                            img_info = curr[3]
+                                            break
+                                        curr = curr[0]
+
+                                    img_fname = None
+                                    img_url = None
+                                    img_mime = "image/jpeg"
+                                    w = None
+                                    h = None
+                                    size_b = None
+
+                                    if isinstance(img_info, list):
+                                        if len(img_info) > 2 and isinstance(img_info[2], str):
+                                            img_fname = img_info[2]
+                                        if len(img_info) > 3 and isinstance(img_info[3], str):
+                                            img_url = img_info[3]
+                                        if len(img_info) > 11 and isinstance(img_info[11], str):
+                                            img_mime = img_info[11]
+                                        if len(img_info) > 15 and isinstance(img_info[15], list):
+                                            dims = img_info[15]
+                                            if len(dims) > 0 and isinstance(dims[0], int):
+                                                w = dims[0]
+                                            if len(dims) > 1 and isinstance(dims[1], int):
+                                                h = dims[1]
+                                            if len(dims) > 2 and isinstance(dims[2], int):
+                                                size_b = dims[2]
+
+                                    target_img_fname = (
+                                        img_fname
+                                        or (f"{image_id}.jpg" if image_id else "generated_image.jpg")
+                                    )
+
+                                    if img_url:
+                                        img_att = {
+                                            "filename": target_img_fname,
+                                            "url": img_url,
+                                            "mime_type": img_mime,
+                                        }
+                                        if w is not None:
+                                            img_att["width"] = w
+                                        if h is not None:
+                                            img_att["height"] = h
+                                        if size_b is not None:
+                                            img_att["size_bytes"] = size_b
+                                        if image_id:
+                                            img_att["image_id"] = image_id
+                                        if model_name:
+                                            img_att["model_name"] = model_name
+
+                                        model_attachments.append(img_att)
+
+                                        if placeholder_url and placeholder_url in model_text:
+                                            model_text = model_text.replace(
+                                                placeholder_url, target_img_fname
+                                            )
+
+                                    if isinstance(thought_entry, list):
+                                        th_fname = (
+                                            thought_entry[2]
+                                            if len(thought_entry) > 2
+                                            and isinstance(thought_entry[2], str)
+                                            else (
+                                                f"thought_{image_id}.pb"
+                                                if image_id
+                                                else "thought_signature.pb"
+                                            )
+                                        )
+                                        th_url = None
+                                        if len(thought_entry) > 7 and isinstance(
+                                            thought_entry[7], list
+                                        ):
+                                            for u in thought_entry[7]:
+                                                if isinstance(u, str) and u.startswith("http"):
+                                                    th_url = u
+                                                    break
+
+                                        th_mime = (
+                                            thought_entry[11]
+                                            if len(thought_entry) > 11
+                                            and isinstance(thought_entry[11], str)
+                                            else "application/protobuf"
+                                        )
+
+                                        if th_url:
+                                            th_att = {
+                                                "filename": th_fname,
+                                                "url": th_url,
+                                                "mime_type": th_mime,
+                                            }
+                                            if image_id:
+                                                th_att["image_id"] = image_id
+                                            if model_name:
+                                                th_att["model_name"] = model_name
+
+                                            model_attachments.append(th_att)
+
             # Check candidate version history
             if len(entry[3]) > 2 and isinstance(entry[3][2], list):
                 for cand_entry in entry[3][2]:
@@ -796,6 +928,9 @@ def download_conversation_files(
                     counter += 1
                 used_filenames.add(filename)
 
+                if filename != orig_name and orig_name in role_data.get("text", ""):
+                    role_data["text"] = role_data["text"].replace(orig_name, filename)
+
                 dest_file = conv_dir / filename
 
                 # If inline HTML content is already present (e.g. widget HTML)
@@ -859,6 +994,8 @@ def download_conversation_files(
                                 except OSError:
                                     pass
                             att["local_path"] = filename
+                            if att.get("size_bytes") is None:
+                                att["size_bytes"] = len(body_bytes)
                             downloaded = True
                             break
                         else:

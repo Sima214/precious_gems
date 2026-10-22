@@ -788,3 +788,215 @@ def test_list_conversations_rpc_js_parsing_logic():
     res = subprocess.run(["node", "-e", js_parser_tester], capture_output=True, text=True)
     assert res.returncode == 0, f"Node test failed: stdout={res.stdout}, stderr={res.stderr}"
     assert "OK" in res.stdout
+
+
+def test_parse_rpc_payload_with_generated_images_and_thought_signatures():
+    gen_img_entry = [
+        # [0]: img_info nested
+        [
+            [
+                [
+                    [
+                        None,
+                        None,
+                        None,
+                        [
+                            None,
+                            1,
+                            "watermarked_img_12345.jpg",
+                            "https://lh3.googleusercontent.com/gg/mock_image_url",
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            [1792408174, 0],
+                            None,
+                            "image/jpeg",
+                            None,
+                            None,
+                            None,
+                            [1024, 1024, 54321],
+                        ],
+                    ]
+                ]
+            ]
+        ],
+        # [1]: placeholder url
+        ["http://googleusercontent.com/image_generation_content/0_999"],
+        None,
+        # [3]: metadata
+        [
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "imagen_default.ultra",  # [18] model_name
+            None,
+            None,
+            None,
+            [
+                None,
+                3,
+                "thought_signature_12345.pb",  # [2]
+                None,
+                None,
+                None,
+                None,
+                ["", "https://contribution.usercontent.google.com/download?thought1", ""],  # [7]
+                None,
+                [1792408174, 0],
+                None,
+                "application/protobuf",  # [11]
+            ],  # [22] thought signature
+        ],
+        None,
+        None,
+        None,
+        None,
+        "im_mock_banana_id",  # [8] image_id
+    ]
+
+    cand12 = [None, None, None, None, None, None, None, [[gen_img_entry]]]
+    cand = [
+        "rc_test_1",
+        ["\nHere is your image:\nhttp://googleusercontent.com/image_generation_content/0_999\nEnjoy!"],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        cand12,
+    ]
+
+    entry3 = [[cand]]
+    mock_entry = [
+        "c_123",
+        "r_123",
+        [None, [["Generate a banana"]], None, []],
+        entry3,
+        [1792408174, 0],
+    ]
+
+    payload = [[mock_entry]]
+    turns = parse_rpc_payload(payload)
+
+    assert len(turns) == 1
+    model_resp = turns[0]["model_response"]
+
+    # Verify placeholder URL was replaced in text
+    assert "http://googleusercontent.com/image_generation_content/0_999" not in model_resp["text"]
+    assert "watermarked_img_12345.jpg" in model_resp["text"]
+
+    # Verify attachments
+    assert "attachments" in model_resp
+    atts = model_resp["attachments"]
+    assert len(atts) == 2
+
+    img_att = next(a for a in atts if a["mime_type"] == "image/jpeg")
+    assert img_att["filename"] == "watermarked_img_12345.jpg"
+    assert img_att["url"] == "https://lh3.googleusercontent.com/gg/mock_image_url"
+    assert img_att["width"] == 1024
+    assert img_att["height"] == 1024
+    assert img_att["size_bytes"] == 54321
+    assert img_att["image_id"] == "im_mock_banana_id"
+    assert img_att["model_name"] == "imagen_default.ultra"
+    assert "placeholder_url" not in img_att
+
+    th_att = next(a for a in atts if a["mime_type"] == "application/protobuf")
+    assert th_att["filename"] == "thought_signature_12345.pb"
+    assert th_att["url"] == "https://contribution.usercontent.google.com/download?thought1"
+    assert th_att["image_id"] == "im_mock_banana_id"
+    assert th_att["model_name"] == "imagen_default.ultra"
+
+
+def test_download_conversation_files_with_generated_images(tmp_path: Path):
+    from precious_gems.rpc import download_conversation_files
+
+    class MockResponse:
+        def __init__(self, body_bytes: bytes):
+            self.status = 200
+            self._body = body_bytes
+
+        def body(self) -> bytes:
+            return self._body
+
+    class MockRequest:
+        def get(self, url: str, timeout: int = 120000):
+            if "mock_image_url" in url:
+                return MockResponse(b"JPEG_MOCK_IMAGE_DATA")
+            if "download?thought" in url:
+                return MockResponse(b"PROTOBUF_MOCK_THOUGHT_DATA")
+            return MockResponse(b"DEFAULT_DATA")
+
+    class MockPage:
+        def __init__(self):
+            self.request = MockRequest()
+
+    turns = [
+        {
+            "model_response": {
+                "text": "Check image: watermarked_img_12345.jpg",
+                "attachments": [
+                    {
+                        "filename": "watermarked_img_12345.jpg",
+                        "url": "https://lh3.googleusercontent.com/gg/mock_image_url",
+                        "mime_type": "image/jpeg",
+                        "image_id": "im_mock_banana_id",
+                    },
+                    {
+                        "filename": "thought_signature_12345.pb",
+                        "url": "https://contribution.usercontent.google.com/download?thought1",
+                        "mime_type": "application/protobuf",
+                        "image_id": "im_mock_banana_id",
+                    },
+                ],
+            }
+        }
+    ]
+
+    hashes = download_conversation_files(
+        page=MockPage(),  # type: ignore
+        output_dir=tmp_path,
+        export_filename="conv_banana",
+        turns=turns,
+    )
+
+    conv_dir = tmp_path / "conv_banana"
+    img_file = conv_dir / "watermarked_img_12345.jpg"
+    th_file = conv_dir / "thought_signature_12345.pb"
+
+    assert img_file.exists()
+    assert img_file.read_bytes() == b"JPEG_MOCK_IMAGE_DATA"
+    assert th_file.exists()
+    assert th_file.read_bytes() == b"PROTOBUF_MOCK_THOUGHT_DATA"
+
+    img_att = turns[0]["model_response"]["attachments"][0]
+    th_att = turns[0]["model_response"]["attachments"][1]
+
+    assert img_att["local_path"] == "watermarked_img_12345.jpg"
+    assert img_att["size_bytes"] == len(b"JPEG_MOCK_IMAGE_DATA")
+    assert th_att["local_path"] == "thought_signature_12345.pb"
+    assert th_att["size_bytes"] == len(b"PROTOBUF_MOCK_THOUGHT_DATA")
+    assert "watermarked_img_12345.jpg" in hashes
+    assert "thought_signature_12345.pb" in hashes
+
