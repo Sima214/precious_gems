@@ -19,6 +19,41 @@ def test_build_parser_export():
     assert args_html.max_attachment_size == "50MB"
 
 
+def test_build_parser_raw():
+    parser = build_parser()
+    args = parser.parse_args(
+        ["raw", "12345", "--output-dir", "/tmp/raw_out", "--cdp-url", "http://127.0.0.1:9222"]
+    )
+    assert args.command == "raw"
+    assert args.target == "12345"
+    assert args.output_dir == "/tmp/raw_out"
+    assert args.cdp_url == "http://127.0.0.1:9222"
+
+
+def test_cmd_raw_execution(tmp_path):
+    from unittest.mock import MagicMock, patch
+    from precious_gems.cli.entry import cmd_raw
+    import argparse
+
+    mock_client = MagicMock()
+    mock_client.get_raw_conversation.return_value = ")]}'\n\n123\nraw_test_data"
+
+    with patch("precious_gems.cli.entry.GeminiClient") as MockClient:
+        MockClient.return_value.__enter__.return_value = mock_client
+        args = argparse.Namespace(
+            target="https://gemini.google.com/app/c_abcdef12345",
+            output_dir=str(tmp_path),
+            cdp_url="http://127.0.0.1:9222",
+        )
+        ret = cmd_raw(args)
+        assert ret == 0
+
+        out_file = tmp_path / "abcdef12345_raw.txt"
+        assert out_file.exists()
+        assert out_file.read_text(encoding="utf-8") == ")]}'\n\n123\nraw_test_data"
+        mock_client.get_raw_conversation.assert_called_once_with("abcdef12345")
+
+
 def test_build_parser_sync():
     parser = build_parser()
     args = parser.parse_args(

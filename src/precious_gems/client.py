@@ -8,10 +8,11 @@ from playwright.sync_api import Error as PlaywrightError, Page
 from .browser import DEFAULT_CDP_URL, BrowserSession, is_target_closed_error
 from .deletion import delete_conversation_dom
 from .extractor import extract_conversation
+from .parser import extract_latest_timestamp
 from .rpc import (
     download_conversation_files,
-    extract_latest_timestamp,
     fetch_conversation_rpc,
+    fetch_raw_conversation_rpc,
     list_conversations_rpc,
 )
 from .sidebar import SidebarConversation, enumerate_conversations
@@ -117,6 +118,15 @@ class GeminiClient:
         if use_html_fallback:
             return extract_conversation(self.page, slug)
         return fetch_conversation_rpc(self.page, slug, title=title)
+
+    def get_raw_conversation(
+        self,
+        conversation_id: str,
+    ) -> str:
+        """Fetches the raw batchexecute response text without parsing turns or saving files."""
+        self.connect()
+        slug = conversation_id.removeprefix("c_")
+        return fetch_raw_conversation_rpc(self.page, slug)
 
     def export_conversation(
         self,

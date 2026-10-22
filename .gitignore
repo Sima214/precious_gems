@@ -20,6 +20,6 @@ env/
 venv/
 
 # Local backup outputs and scratch data
-output/
+output*/
 backups/
 *.log

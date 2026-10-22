@@ -56,6 +56,24 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_raw(args: argparse.Namespace) -> int:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    target = args.target.strip()
+    conv_id = target.split("/app/")[-1].split("?")[0].split("#")[0] if "/app/" in target else target
+    slug = conv_id.removeprefix("c_")
+
+    print(f"Connecting to Chrome CDP at {args.cdp_url}...", flush=True)
+    with GeminiClient(cdp_url=args.cdp_url, output_dir=output_dir) as client:
+        print(f"Fetching raw conversation {slug}...", flush=True)
+        raw_text = client.get_raw_conversation(slug)
+        out_file = output_dir / f"{slug}_raw.txt"
+        out_file.write_text(raw_text, encoding="utf-8")
+        print(f"[OK] {slug} -> {out_file} ({len(raw_text.encode('utf-8'))} bytes)", flush=True)
+    return 0
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     catalog = Catalog(output_dir)
@@ -348,6 +366,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum attachment size to download (e.g. '50MB', '500KB', '1000').",
     )
     p_export.set_defaults(func=cmd_export)
+
+    # raw subcommand
+    p_raw = subparsers.add_parser(
+        "raw", help="Fetch and save raw batchexecute response text for a conversation."
+    )
+    p_raw.add_argument("target", help="Conversation URL or ID to fetch.")
+    p_raw.add_argument(
+        "--output-dir", default="./output", help="Directory to save raw response file."
+    )
+    p_raw.add_argument("--cdp-url", default=DEFAULT_CDP_URL, help="Chrome CDP debugging URL.")
+    p_raw.set_defaults(func=cmd_raw)
 
     # scan subcommand
     p_scan = subparsers.add_parser("scan", help="Scan and cache all conversation IDs and titles.")
